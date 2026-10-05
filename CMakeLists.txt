@@ -13,6 +13,8 @@ add_executable(p03_all_primes  level1/p03_all_primes/main.c)
 add_executable(p04_hanoi  level1/p04_hanoi/main.c)
 
 add_executable(p05_maze  level1/p05_maze/main.c)
+find_package(Curses REQUIRED)
+target_link_libraries(p05_maze PRIVATE ${CURSES_LIBRARIES})
 
 add_executable(p06_push_boxes  level1/p06_push_boxes/main.c)
 

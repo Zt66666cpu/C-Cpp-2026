@@ -17,6 +17,9 @@ find_package(Curses REQUIRED)
 target_link_libraries(p05_maze PRIVATE ${CURSES_LIBRARIES})
 
 add_executable(p06_push_boxes  level1/p06_push_boxes/main.c)
+find_package(Curses REQUIRED)
+target_link_libraries(p06_push_boxes PRIVATE ${CURSES_LIBRARIES})
+target_compile_definitions(p06_push_boxes PRIVATE MAP_FILES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/level1/p06_push_boxes/map files")
 
 add_executable(p07_linked_list  level1/p07_linked_list/main.c)
 

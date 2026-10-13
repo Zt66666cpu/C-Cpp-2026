@@ -39,6 +39,9 @@ main
 *.ilk
 *.dSYM/
 
+# Runtime-generated game data
+scores.txt
+
 # Editor temporary files
 *.swp
 *.swo

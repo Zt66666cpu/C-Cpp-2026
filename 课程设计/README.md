@@ -1,5 +1,9 @@
 ## 实验题目：五子棋AI
 
+## 本项目
+
+- [五子棋 AI 项目目录](gomoku_ai/README.md)
+
 ## GUI
 - [raylib](https://github.com/raysan5/raylib)
 - [EasyX](https://easyx.cn/)

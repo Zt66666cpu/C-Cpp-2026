@@ -1,0 +1,16 @@
+# 项目级补充忽略规则；通用规则由课程仓库根目录 .gitignore 管理
+# Runtime artifacts
+*.log
+*.dmp
+*.tmp
+
+# Secrets and local environment
+.env
+.env.*
+*.key
+*.pem
+
+# Local model files and large training artifacts
+models/
+checkpoints/
+training-data/

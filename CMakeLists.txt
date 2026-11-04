@@ -6,7 +6,8 @@ set(CMAKE_CXX_STANDARD 17)
 
 add_executable(p01_running_letter level1/p01_running_letter/main.c)
 
-add_executable(p02_is_prime  level1/p02_is_prime/main.c)
+add_executable(p02_is_prime  level1/p02_is_prime/main.c
+        level1/p02_is_prime/is_primefunction.c)
 
 add_executable(p03_all_primes  level1/p03_all_primes/main.c)
 

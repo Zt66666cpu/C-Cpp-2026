@@ -8,5 +8,31 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 add_executable(gomoku_ai
     src/main.c
-    src/function_list.c
+    src/board.c
+    src/rules.c
+    src/console_ui.c
 )
+
+target_include_directories(gomoku_ai PRIVATE include)
+
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(gomoku_ai PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+include(CTest)
+
+if(BUILD_TESTING)
+    add_executable(gomoku_tests
+        tests/test_gomoku.c
+        src/board.c
+        src/rules.c
+    )
+
+    target_include_directories(gomoku_tests PRIVATE include)
+
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(gomoku_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    add_test(NAME gomoku_tests COMMAND gomoku_tests)
+endif()

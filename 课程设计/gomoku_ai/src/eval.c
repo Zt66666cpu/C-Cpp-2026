@@ -40,12 +40,23 @@ static void scan_binary_line(
         }
 
         int end = start;
+        int seg_ones = 0;
         while (end < len && line[end] != 2) {
+            if (line[end] == 1) {
+                ++seg_ones;
+            }
             ++end;
         }
 
         int seg_len = end - start;
-        if (seg_len < 5) {
+        if (seg_len < 5 || seg_ones == 0) {
+            start = end;
+            continue;
+        }
+        if (seg_ones == 1) {
+            if (counts->max_run < 1) {
+                counts->max_run = 1;
+            }
             start = end;
             continue;
         }
@@ -56,7 +67,7 @@ static void scan_binary_line(
             covered[i] = false;
         }
 
-        /* 1. 连续五连及以上 */
+        /* 1. 连续连子长度与五连以上 */
         int i = 0;
         while (i < seg_len) {
             if (seg[i] != 1) {
@@ -81,82 +92,40 @@ static void scan_binary_line(
         }
 
         /* 2. 活四：0 1 1 1 1 0 */
-        for (int j = 0; j <= seg_len - 6; ++j) {
-            if (seg[j] == 0
-                && seg[j + 1] == 1
-                && seg[j + 2] == 1
-                && seg[j + 3] == 1
-                && seg[j + 4] == 1
-                && seg[j + 5] == 0
-                && !covered[j + 1]
-                && !covered[j + 2]
-                && !covered[j + 3]
-                && !covered[j + 4]) {
-                ++counts->open_four;
-                for (int k = j + 1; k <= j + 4; ++k) {
-                    covered[k] = true;
-                }
-            }
-        }
-
-        /* 3. 冲四（含跳冲四）：长度为 5 的无阻挡窗口中有 4 子 1 空 */
-        for (int j = 0; j <= seg_len - 5; ++j) {
-            int ones = 0;
-            bool all_covered = true;
-            for (int k = 0; k < 5; ++k) {
-                if (seg[j + k] == 1) {
-                    ++ones;
-                    if (!covered[j + k]) {
-                        all_covered = false;
+        if (seg_ones >= 4) {
+            for (int j = 0; j <= seg_len - 6; ++j) {
+                if (seg[j] == 0
+                    && seg[j + 1] == 1
+                    && seg[j + 2] == 1
+                    && seg[j + 3] == 1
+                    && seg[j + 4] == 1
+                    && seg[j + 5] == 0
+                    && !covered[j + 1]
+                    && !covered[j + 2]
+                    && !covered[j + 3]
+                    && !covered[j + 4]) {
+                    ++counts->open_four;
+                    for (int k = j + 1; k <= j + 4; ++k) {
+                        covered[k] = true;
                     }
                 }
             }
-            if (ones == 4 && !all_covered) {
-                ++counts->rush_four;
+
+            /* 3. 冲四（含跳冲四）：长度为 5 的无阻挡窗口中有 4 子 1 空 */
+            for (int j = 0; j <= seg_len - 5; ++j) {
+                int ones = 0;
+                bool all_covered = true;
                 for (int k = 0; k < 5; ++k) {
                     if (seg[j + k] == 1) {
-                        covered[j + k] = true;
+                        ++ones;
+                        if (!covered[j + k]) {
+                            all_covered = false;
+                        }
                     }
                 }
-            }
-        }
-
-        /* 4. 活三：连活三（两侧留空且至少一侧有两空）与跳活三 */
-        for (int j = 0; j <= seg_len - 5; ++j) {
-            if (seg[j] == 0
-                && seg[j + 1] == 1
-                && seg[j + 2] == 1
-                && seg[j + 3] == 1
-                && seg[j + 4] == 0
-                && ((j > 0 && seg[j - 1] == 0)
-                    || (j + 5 < seg_len && seg[j + 5] == 0))
-                && !covered[j + 1]
-                && !covered[j + 2]
-                && !covered[j + 3]) {
-                ++counts->open_three;
-                covered[j + 1] = true;
-                covered[j + 2] = true;
-                covered[j + 3] = true;
-            }
-        }
-
-        for (int j = 0; j <= seg_len - 6; ++j) {
-            bool pattern_a = seg[j] == 0 && seg[j + 1] == 1 && seg[j + 2] == 0
-                && seg[j + 3] == 1 && seg[j + 4] == 1 && seg[j + 5] == 0;
-            bool pattern_b = seg[j] == 0 && seg[j + 1] == 1 && seg[j + 2] == 1
-                && seg[j + 3] == 0 && seg[j + 4] == 1 && seg[j + 5] == 0;
-            if ((pattern_a || pattern_b)
-                && (j == 0 || seg[j - 1] == 0)
-                && (j + 6 == seg_len || seg[j + 6] == 0)) {
-                bool any_covered = false;
-                for (int k = 1; k <= 4; ++k) {
-                    if (seg[j + k] == 1 && covered[j + k]) {
-                        any_covered = true;
-                    }
-                }
-                if (!any_covered) {
-                    ++counts->open_three;
-                    for (int k = 1; k <= 4; ++k) {
+                if (ones == 4 && !all_covered) {
+                    ++counts->rush_four;
+                    for (int k = 0; k < 5; ++k) {
                         if (seg[j + k] == 1) {
                             covered[j + k] = true;
                         }
@@ -165,23 +134,69 @@ static void scan_binary_line(
             }
         }
 
-        /* 5. 眠三：5 格窗口内 3 子 2 空且未被更强棋型覆盖 */
-        for (int j = 0; j <= seg_len - 5; ++j) {
-            int ones = 0;
-            bool any_covered = false;
-            for (int k = 0; k < 5; ++k) {
-                if (seg[j + k] == 1) {
-                    ++ones;
-                    if (covered[j + k]) {
-                        any_covered = true;
+        /* 4. 活三：连活三（两侧留空且至少一侧有两空）与跳活三 */
+        if (seg_ones >= 3) {
+            for (int j = 0; j <= seg_len - 5; ++j) {
+                if (seg[j] == 0
+                    && seg[j + 1] == 1
+                    && seg[j + 2] == 1
+                    && seg[j + 3] == 1
+                    && seg[j + 4] == 0
+                    && ((j > 0 && seg[j - 1] == 0)
+                        || (j + 5 < seg_len && seg[j + 5] == 0))
+                    && !covered[j + 1]
+                    && !covered[j + 2]
+                    && !covered[j + 3]) {
+                    ++counts->open_three;
+                    covered[j + 1] = true;
+                    covered[j + 2] = true;
+                    covered[j + 3] = true;
+                }
+            }
+
+            for (int j = 0; j <= seg_len - 6; ++j) {
+                bool pattern_a = seg[j] == 0 && seg[j + 1] == 1 && seg[j + 2] == 0
+                    && seg[j + 3] == 1 && seg[j + 4] == 1 && seg[j + 5] == 0;
+                bool pattern_b = seg[j] == 0 && seg[j + 1] == 1 && seg[j + 2] == 1
+                    && seg[j + 3] == 0 && seg[j + 4] == 1 && seg[j + 5] == 0;
+                if ((pattern_a || pattern_b)
+                    && (j == 0 || seg[j - 1] == 0)
+                    && (j + 6 == seg_len || seg[j + 6] == 0)) {
+                    bool any_covered = false;
+                    for (int k = 1; k <= 4; ++k) {
+                        if (seg[j + k] == 1 && covered[j + k]) {
+                            any_covered = true;
+                        }
+                    }
+                    if (!any_covered) {
+                        ++counts->open_three;
+                        for (int k = 1; k <= 4; ++k) {
+                            if (seg[j + k] == 1) {
+                                covered[j + k] = true;
+                            }
+                        }
                     }
                 }
             }
-            if (ones == 3 && !any_covered) {
-                ++counts->sleep_three;
+
+            /* 5. 眠三：5 格窗口内 3 子 2 空且未被更强棋型覆盖 */
+            for (int j = 0; j <= seg_len - 5; ++j) {
+                int ones = 0;
+                bool any_covered = false;
                 for (int k = 0; k < 5; ++k) {
                     if (seg[j + k] == 1) {
-                        covered[j + k] = true;
+                        ++ones;
+                        if (covered[j + k]) {
+                            any_covered = true;
+                        }
+                    }
+                }
+                if (ones == 3 && !any_covered) {
+                    ++counts->sleep_three;
+                    for (int k = 0; k < 5; ++k) {
+                        if (seg[j + k] == 1) {
+                            covered[j + k] = true;
+                        }
                     }
                 }
             }
@@ -257,6 +272,8 @@ static void extract_board_line_and_scan(
 ) {
     int my_line[BOARD_SIZE + 2];
     int opp_line[BOARD_SIZE + 2];
+    int my_stones = 0;
+    int opp_stones = 0;
 
     my_line[0] = 2;
     opp_line[0] = 2;
@@ -266,9 +283,11 @@ static void extract_board_line_and_scan(
         if (cell == my) {
             my_line[i + 1] = 1;
             opp_line[i + 1] = 2;
+            ++my_stones;
         } else if (cell == opp) {
             my_line[i + 1] = 2;
             opp_line[i + 1] = 1;
+            ++opp_stones;
         } else {
             my_line[i + 1] = 0;
             opp_line[i + 1] = 0;
@@ -278,8 +297,12 @@ static void extract_board_line_and_scan(
     my_line[len + 1] = 2;
     opp_line[len + 1] = 2;
 
-    scan_binary_line(my_line, len + 2, my_counts);
-    scan_binary_line(opp_line, len + 2, opp_counts);
+    if (my_stones > 0) {
+        scan_binary_line(my_line, len + 2, my_counts);
+    }
+    if (opp_stones > 0) {
+        scan_binary_line(opp_line, len + 2, opp_counts);
+    }
 }
 
 void eval_extract_features(

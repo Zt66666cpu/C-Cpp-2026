@@ -326,80 +326,177 @@ void nn_build_cnn_input(
     }
 }
 
-static void conv3x3_hwc(
-    const float *in,
+static void im2col_3x3_hwc(
+    const float * restrict in,
     uint32_t cin,
-    const float *w,
-    const float *b,
-    uint32_t cout,
-    const float *residual,
-    bool apply_relu,
-    float *out
+    float * restrict col
 ) {
+    size_t row_stride = (size_t)cin * 9U;
+    size_t cin_bytes = (size_t)cin * sizeof(float);
+
     for (int r = 0; r < BOARD_SIZE; ++r) {
         for (int c = 0; c < BOARD_SIZE; ++c) {
-            size_t spatial = (size_t)r * BOARD_SIZE + (size_t)c;
-            float *dst = out + spatial * cout;
-            const float *res_ptr = residual ? (residual + spatial * cout) : NULL;
-
-            for (uint32_t co = 0; co < cout; ++co) {
-                dst[co] = b[co];
-            }
-
+            float * restrict dst_row = col + ((size_t)r * BOARD_SIZE + (size_t)c) * row_stride;
             for (int kr = 0; kr < 3; ++kr) {
                 int nr = r + kr - 1;
-                if (nr < 0 || nr >= BOARD_SIZE) continue;
+                if (nr < 0 || nr >= BOARD_SIZE) {
+                    memset(dst_row + (size_t)kr * 3U * cin, 0, 3U * cin_bytes);
+                    continue;
+                }
                 for (int kc = 0; kc < 3; ++kc) {
                     int nc = c + kc - 1;
-                    if (nc < 0 || nc >= BOARD_SIZE) continue;
-                    const float *src = in + ((size_t)nr * BOARD_SIZE + (size_t)nc) * cin;
-                    uint32_t kidx = (uint32_t)(kr * 3 + kc);
-                    for (uint32_t co = 0; co < cout; ++co) {
-                        const float *wk = w + ((size_t)co * 9U + kidx) * cin;
-                        float acc = 0.0f;
-                        for (uint32_t ci = 0; ci < cin; ++ci) {
-                            acc += wk[ci] * src[ci];
-                        }
-                        dst[co] += acc;
+                    float * restrict dst = dst_row + (size_t)(kr * 3 + kc) * cin;
+                    if (nc < 0 || nc >= BOARD_SIZE) {
+                        memset(dst, 0, cin_bytes);
+                    } else {
+                        const float * restrict src =
+                            in + ((size_t)nr * BOARD_SIZE + (size_t)nc) * cin;
+                        memcpy(dst, src, cin_bytes);
                     }
-                }
-            }
-
-            if (res_ptr) {
-                for (uint32_t co = 0; co < cout; ++co) {
-                    dst[co] += res_ptr[co];
-                }
-            }
-            if (apply_relu) {
-                for (uint32_t co = 0; co < cout; ++co) {
-                    dst[co] = relu_f(dst[co]);
                 }
             }
         }
     }
 }
 
-static void conv1x1_hwc(
-    const float *in,
-    uint32_t cin,
-    const float *w,
-    const float *b,
-    uint32_t cout,
+/* 4x4 寄存器分块矩阵乘：out[M][N] = A[M][K] * W[N][K]^T + b[N] (+ residual)，可选 ReLU */
+static void gemm_nt_4x4(
+    const float * restrict A,
+    uint32_t M,
+    uint32_t K,
+    const float * restrict W,
+    const float * restrict b,
+    uint32_t N,
+    const float * restrict residual,
     bool apply_relu,
-    float *out
+    float * restrict out
 ) {
-    for (size_t s = 0; s < BOARD_CELLS; ++s) {
-        const float *src = in + s * cin;
-        float *dst = out + s * cout;
-        for (uint32_t co = 0; co < cout; ++co) {
-            const float *wc = w + (size_t)co * cin;
-            float acc = b[co];
-            for (uint32_t ci = 0; ci < cin; ++ci) {
-                acc += wc[ci] * src[ci];
+    uint32_t s = 0;
+    for (; s + 4U <= M; s += 4U) {
+        const float * restrict a0 = A + (size_t)(s + 0U) * K;
+        const float * restrict a1 = A + (size_t)(s + 1U) * K;
+        const float * restrict a2 = A + (size_t)(s + 2U) * K;
+        const float * restrict a3 = A + (size_t)(s + 3U) * K;
+
+        uint32_t co = 0;
+        for (; co + 4U <= N; co += 4U) {
+            const float * restrict w0 = W + (size_t)(co + 0U) * K;
+            const float * restrict w1 = W + (size_t)(co + 1U) * K;
+            const float * restrict w2 = W + (size_t)(co + 2U) * K;
+            const float * restrict w3 = W + (size_t)(co + 3U) * K;
+
+            float c00 = b[co + 0U], c01 = b[co + 1U], c02 = b[co + 2U], c03 = b[co + 3U];
+            float c10 = b[co + 0U], c11 = b[co + 1U], c12 = b[co + 2U], c13 = b[co + 3U];
+            float c20 = b[co + 0U], c21 = b[co + 1U], c22 = b[co + 2U], c23 = b[co + 3U];
+            float c30 = b[co + 0U], c31 = b[co + 1U], c32 = b[co + 2U], c33 = b[co + 3U];
+
+            for (uint32_t k = 0; k < K; ++k) {
+                float va0 = a0[k], va1 = a1[k], va2 = a2[k], va3 = a3[k];
+                float vw0 = w0[k], vw1 = w1[k], vw2 = w2[k], vw3 = w3[k];
+                c00 += va0 * vw0; c01 += va0 * vw1; c02 += va0 * vw2; c03 += va0 * vw3;
+                c10 += va1 * vw0; c11 += va1 * vw1; c12 += va1 * vw2; c13 += va1 * vw3;
+                c20 += va2 * vw0; c21 += va2 * vw1; c22 += va2 * vw2; c23 += va2 * vw3;
+                c30 += va3 * vw0; c31 += va3 * vw1; c32 += va3 * vw2; c33 += va3 * vw3;
             }
-            dst[co] = apply_relu ? relu_f(acc) : acc;
+
+            float * restrict d0 = out + (size_t)(s + 0U) * N + co;
+            float * restrict d1 = out + (size_t)(s + 1U) * N + co;
+            float * restrict d2 = out + (size_t)(s + 2U) * N + co;
+            float * restrict d3 = out + (size_t)(s + 3U) * N + co;
+
+            if (residual) {
+                const float * restrict r0 = residual + (size_t)(s + 0U) * N + co;
+                const float * restrict r1 = residual + (size_t)(s + 1U) * N + co;
+                const float * restrict r2 = residual + (size_t)(s + 2U) * N + co;
+                const float * restrict r3 = residual + (size_t)(s + 3U) * N + co;
+                c00 += r0[0]; c01 += r0[1]; c02 += r0[2]; c03 += r0[3];
+                c10 += r1[0]; c11 += r1[1]; c12 += r1[2]; c13 += r1[3];
+                c20 += r2[0]; c21 += r2[1]; c22 += r2[2]; c23 += r2[3];
+                c30 += r3[0]; c31 += r3[1]; c32 += r3[2]; c33 += r3[3];
+            }
+
+            if (apply_relu) {
+                c00 = relu_f(c00); c01 = relu_f(c01); c02 = relu_f(c02); c03 = relu_f(c03);
+                c10 = relu_f(c10); c11 = relu_f(c11); c12 = relu_f(c12); c13 = relu_f(c13);
+                c20 = relu_f(c20); c21 = relu_f(c21); c22 = relu_f(c22); c23 = relu_f(c23);
+                c30 = relu_f(c30); c31 = relu_f(c31); c32 = relu_f(c32); c33 = relu_f(c33);
+            }
+
+            d0[0] = c00; d0[1] = c01; d0[2] = c02; d0[3] = c03;
+            d1[0] = c10; d1[1] = c11; d1[2] = c12; d1[3] = c13;
+            d2[0] = c20; d2[1] = c21; d2[2] = c22; d2[3] = c23;
+            d3[0] = c30; d3[1] = c31; d3[2] = c32; d3[3] = c33;
+        }
+
+        for (; co < N; ++co) {
+            const float * restrict wc = W + (size_t)co * K;
+            float c0 = b[co], c1 = b[co], c2 = b[co], c3 = b[co];
+            for (uint32_t k = 0; k < K; ++k) {
+                float wk = wc[k];
+                c0 += a0[k] * wk;
+                c1 += a1[k] * wk;
+                c2 += a2[k] * wk;
+                c3 += a3[k] * wk;
+            }
+            if (residual) {
+                c0 += residual[(size_t)(s + 0U) * N + co];
+                c1 += residual[(size_t)(s + 1U) * N + co];
+                c2 += residual[(size_t)(s + 2U) * N + co];
+                c3 += residual[(size_t)(s + 3U) * N + co];
+            }
+            if (apply_relu) {
+                c0 = relu_f(c0); c1 = relu_f(c1); c2 = relu_f(c2); c3 = relu_f(c3);
+            }
+            out[(size_t)(s + 0U) * N + co] = c0;
+            out[(size_t)(s + 1U) * N + co] = c1;
+            out[(size_t)(s + 2U) * N + co] = c2;
+            out[(size_t)(s + 3U) * N + co] = c3;
         }
     }
+
+    for (; s < M; ++s) {
+        const float * restrict as = A + (size_t)s * K;
+        float * restrict ds = out + (size_t)s * N;
+        const float * restrict rs = residual ? (residual + (size_t)s * N) : NULL;
+        for (uint32_t co = 0; co < N; ++co) {
+            const float * restrict wc = W + (size_t)co * K;
+            float acc = b[co];
+            for (uint32_t k = 0; k < K; ++k) {
+                acc += as[k] * wc[k];
+            }
+            if (rs) acc += rs[co];
+            ds[co] = apply_relu ? relu_f(acc) : acc;
+        }
+    }
+}
+
+static void conv3x3_hwc(
+    const float * restrict in,
+    uint32_t cin,
+    const float * restrict w,
+    const float * restrict b,
+    uint32_t cout,
+    const float * restrict residual,
+    bool apply_relu,
+    float * restrict col_scratch,
+    float * restrict out
+) {
+    im2col_3x3_hwc(in, cin, col_scratch);
+    gemm_nt_4x4(
+        col_scratch, BOARD_CELLS, cin * 9U, w, b, cout, residual, apply_relu, out
+    );
+}
+
+static void conv1x1_hwc(
+    const float * restrict in,
+    uint32_t cin,
+    const float * restrict w,
+    const float * restrict b,
+    uint32_t cout,
+    bool apply_relu,
+    float * restrict out
+) {
+    gemm_nt_4x4(in, BOARD_CELLS, cin, w, b, cout, NULL, apply_relu, out);
 }
 
 float cnn_forward(
@@ -412,10 +509,12 @@ float cnn_forward(
     }
 
     uint32_t ch = model->ch;
+    uint32_t max_in = model->in_ch > ch ? model->in_ch : ch;
     uint32_t max_head = model->pol_mid > model->val_mid ? model->pol_mid : model->val_mid;
     size_t buf_plane = (size_t)BOARD_CELLS * ch;
+    size_t col_plane = (size_t)BOARD_CELLS * 9U * max_in;
     size_t head_plane = (size_t)BOARD_CELLS * max_head;
-    size_t total_floats = buf_plane * 3U + head_plane + model->val_fc;
+    size_t total_floats = buf_plane * 3U + col_plane + head_plane + model->val_fc;
 
     float *scratch = malloc(total_floats * sizeof(float));
     if (!scratch) {
@@ -425,24 +524,25 @@ float cnn_forward(
     float *cur = scratch;
     float *tmp1 = cur + buf_plane;
     float *tmp2 = tmp1 + buf_plane;
-    float *head_buf = tmp2 + buf_plane;
+    float *col_buf = tmp2 + buf_plane;
+    float *head_buf = col_buf + col_plane;
     float *fc_buf = head_buf + head_plane;
 
     /* Stem */
     conv3x3_hwc(
         input_hwc, model->in_ch, model->stem_w, model->stem_b,
-        ch, NULL, true, cur
+        ch, NULL, true, col_buf, cur
     );
 
     /* Residual tower */
     for (uint32_t b = 0; b < model->num_blocks; ++b) {
         conv3x3_hwc(
             cur, ch, model->blocks[b].w1, model->blocks[b].b1,
-            ch, NULL, true, tmp1
+            ch, NULL, true, col_buf, tmp1
         );
         conv3x3_hwc(
             tmp1, ch, model->blocks[b].w2, model->blocks[b].b2,
-            ch, cur, true, tmp2
+            ch, cur, true, col_buf, tmp2
         );
         memcpy(cur, tmp2, buf_plane * sizeof(float));
     }

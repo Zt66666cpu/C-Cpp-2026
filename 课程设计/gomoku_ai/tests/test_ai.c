@@ -301,6 +301,38 @@ static void test_eval_broken_four_and_jump_three(void) {
     CHECK(feat.values[6] >= 1.0f); /* my_open_three */
 }
 
+static void test_jump_three_defense_and_cnn_smoke(void) {
+    /* 跳活三 . O . O O . 应被及时识别并阻断 */
+    Board board;
+    board_init(&board);
+    board.cells[7][5] = CELL_WHITE;
+    board.cells[7][7] = CELL_WHITE;
+    board.cells[7][8] = CELL_WHITE;
+    board.cells[10][10] = CELL_BLACK;
+    board.cells[10][11] = CELL_BLACK;
+
+    SearchConfig cfg = search_default_config();
+    cfg.max_depth = 4;
+    cfg.time_limit_sec = 2.0;
+
+    Move last = {7, 8};
+    SearchResult res = search_find_best_move(&board, CELL_BLACK, last, &cfg, NULL, NULL);
+    CHECK(res.valid);
+    CHECK(res.best_move.row == 7
+          && (res.best_move.col == 6 || res.best_move.col == 4 || res.best_move.col == 9));
+
+    /* 若运行目录下存在 models/cnn.bin，验证纯 C11 CNN 推理输出合法 */
+    CnnModel *cnn = cnn_load("models/cnn.bin");
+    if (cnn) {
+        float cnn_in[BOARD_CELLS * CNN_INPUT_CHANNELS];
+        float logits[BOARD_CELLS];
+        nn_build_cnn_input(&board, CELL_BLACK, last, cnn_in);
+        float val = cnn_forward(cnn, cnn_in, logits);
+        CHECK(val >= -1.0f && val <= 1.0f);
+        cnn_free(cnn);
+    }
+}
+
 int main(void) {
     test_board_undo_and_rule_probes();
     test_search_immediate_win();
@@ -315,6 +347,7 @@ int main(void) {
     test_vcf_black_avoids_forbidden_path();
     test_search_respects_tight_time_budget();
     test_eval_broken_four_and_jump_three();
+    test_jump_three_defense_and_cnn_smoke();
 
     if (failures != 0) {
         fprintf(stderr, "%d AI test(s) failed.\n", failures);

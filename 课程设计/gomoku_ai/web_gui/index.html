@@ -1,0 +1,1404 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>连珠五子棋 AI 实验室 · Gomoku Studio</title>
+  <style>
+    :root {
+      --bg: #121318;
+      --panel: #1b1d25;
+      --panel-2: #222531;
+      --border: #2e3242;
+      --text: #eceef4;
+      --muted: #98a0b3;
+      --accent: #e2b66d;
+      --accent-soft: rgba(226, 182, 109, 0.16);
+      --emerald: #44cf94;
+      --danger: #e45b67;
+      --shadow: 0 18px 46px rgba(0, 0, 0, 0.45);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: radial-gradient(circle at 20% 0%, #1d202b 0%, var(--bg) 58%);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 24px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(18, 19, 24, 0.82);
+      backdrop-filter: blur(10px);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #ffffff 0%, #c8c8cf 55%, #7c7e88 100%);
+      box-shadow: 0 0 0 3px rgba(226, 182, 109, 0.25);
+    }
+
+    .brand h1 {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+    }
+
+    .brand span {
+      font-size: 12px;
+      color: var(--accent);
+      background: var(--accent-soft);
+      border: 1px solid rgba(226, 182, 109, 0.28);
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+
+    .engine-badge {
+      font-size: 12px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 12px;
+    }
+
+    .status-pill i {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--emerald);
+      display: inline-block;
+    }
+
+    .status-pill.thinking i {
+      background: var(--accent);
+      animation: pulse 0.8s infinite alternate;
+    }
+
+    @keyframes pulse {
+      from { opacity: 0.35; transform: scale(0.85); }
+      to { opacity: 1; transform: scale(1.2); }
+    }
+
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 390px;
+      gap: 20px;
+      padding: 18px 24px;
+      max-width: 1360px;
+      width: 100%;
+      margin: 0 auto;
+      align-items: start;
+    }
+
+    .stage {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+      position: relative;
+    }
+
+    .winbar-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      height: min(76vh, 650px);
+      width: 44px;
+      flex-shrink: 0;
+    }
+
+    .winbar-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.25;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .winbar-track {
+      flex: 1;
+      width: 18px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, #f3f4f8 0%, #dcdde6 100%);
+      border: 1px solid var(--border);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.45);
+      position: relative;
+    }
+
+    .winbar-black {
+      width: 100%;
+      height: 50%;
+      background: linear-gradient(180deg, #323642 0%, #15171d 100%);
+      transition: height 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    .winbar-mid {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 50%;
+      height: 1px;
+      background: rgba(226, 182, 109, 0.55);
+      pointer-events: none;
+    }
+
+    .board-shell {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    canvas#boardCanvas {
+      width: min(76vh, 650px, calc(100vw - 490px));
+      height: min(76vh, 650px, calc(100vw - 490px));
+      min-width: 340px;
+      min-height: 340px;
+      border-radius: 10px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(255, 224, 175, 0.22);
+      cursor: pointer;
+      display: block;
+    }
+
+    .toast {
+      position: absolute;
+      bottom: 26px;
+      left: 50%;
+      transform: translateX(-50%) translateY(8px);
+      background: rgba(20, 22, 30, 0.94);
+      border: 1px solid var(--accent);
+      color: var(--text);
+      padding: 8px 16px;
+      border-radius: 999px;
+      font-size: 13px;
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.2s ease;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+      white-space: nowrap;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      box-shadow: var(--shadow);
+    }
+
+    .card-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      letter-spacing: 0.6px;
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .turn-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .turn-who {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .stone-ico {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      display: inline-block;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+    }
+
+    .stone-ico.black {
+      background: radial-gradient(circle at 32% 30%, #585c69 0%, #1c1e24 55%, #090a0d 100%);
+      border: 1px solid #414554;
+    }
+
+    .stone-ico.white {
+      background: radial-gradient(circle at 32% 30%, #ffffff 0%, #eceef4 60%, #bfc5d3 100%);
+    }
+
+    .meta-sub {
+      font-size: 12px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .seg {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+
+    .seg.cols-4 { grid-template-columns: repeat(4, 1fr); }
+    .seg.cols-3 { grid-template-columns: repeat(3, 1fr); }
+
+    button {
+      font-family: inherit;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 7px 8px;
+      font-size: 12px;
+      transition: all 0.14s ease;
+    }
+
+    button:hover:not(:disabled) {
+      border-color: rgba(226, 182, 109, 0.55);
+      background: #292d3c;
+    }
+
+    button.active {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: #f7deb1;
+      font-weight: 600;
+    }
+
+    button.primary {
+      background: linear-gradient(135deg, #d6a559 0%, #b5823b 100%);
+      color: #16130e;
+      border-color: #e6be7d;
+      font-weight: 600;
+    }
+
+    button.primary:hover:not(:disabled) {
+      filter: brightness(1.07);
+    }
+
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .sliders {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 6px;
+    }
+
+    .slider-item label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    .slider-item input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+
+    .btn-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+
+    .toggles {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .toggles button {
+      flex: 1 1 auto;
+      padding: 5px 8px;
+      font-size: 11px;
+    }
+
+    canvas#chartCanvas {
+      width: 100%;
+      height: 110px;
+      border-radius: 8px;
+      background: #14161d;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      display: block;
+    }
+
+    .replay-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+
+    .moves-list {
+      max-height: 158px;
+      overflow-y: auto;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      padding-right: 2px;
+    }
+
+    .move-chip {
+      padding: 3px 7px;
+      font-size: 11px;
+      border-radius: 6px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      cursor: pointer;
+    }
+
+    .move-chip.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-weight: 600;
+    }
+
+    .move-chip .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      margin-right: 4px;
+    }
+
+    .move-chip .dot.b { background: #14161c; border: 1px solid #6e7588; }
+    .move-chip .dot.w { background: #eef1f7; }
+
+    .kbd-hint {
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    @media (max-width: 980px) {
+      main {
+        grid-template-columns: 1fr;
+        padding: 12px;
+      }
+      canvas#boardCanvas {
+        width: min(88vw, 560px);
+        height: min(88vw, 560px);
+      }
+      .winbar-wrap {
+        height: min(88vw, 560px);
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-dot"></div>
+      <h1>连珠五子棋 AI 实验室</h1>
+      <span>纯 C11 引擎直连 · Renju 禁手规则</span>
+    </div>
+    <div class="engine-badge">
+      <span id="libInfo">正在连接 C11 引擎...</span>
+      <span class="status-pill" id="statusPill"><i></i><span id="statusText">就绪</span></span>
+    </div>
+  </header>
+
+  <main>
+    <section class="stage">
+      <div class="winbar-wrap" title="黑棋实时胜率条">
+        <div class="winbar-label" id="whitePctLabel">白<br>50%</div>
+        <div class="winbar-track">
+          <div class="winbar-black" id="winbarBlack"></div>
+          <div class="winbar-mid"></div>
+        </div>
+        <div class="winbar-label" id="blackPctLabel">黑<br>50%</div>
+      </div>
+
+      <div class="board-shell">
+        <canvas id="boardCanvas"></canvas>
+      </div>
+
+      <div class="toast" id="toast"></div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="card">
+        <div class="turn-banner">
+          <div class="turn-who">
+            <span class="stone-ico black" id="turnStoneIcon"></span>
+            <span id="turnLabel">黑方行棋 · 手数 0</span>
+          </div>
+          <div class="meta-sub" id="evalMeta">耗时 — ms</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><span>对局模式与引擎</span><span id="viewBadge">实时对局</span></div>
+        <div class="seg cols-4" id="modeGroup">
+          <button data-mode="human_black" class="active">人机·执黑</button>
+          <button data-mode="human_white">人机·执白</button>
+          <button data-mode="two_player">双人对弈</button>
+          <button data-mode="ai_vs_ai">AI 互搏</button>
+        </div>
+        <div class="seg cols-3" id="engineGroup">
+          <button data-engine="v3" class="active">V3 Pattern-NNUE</button>
+          <button data-engine="v2">V2 NNUE+CNN</button>
+          <button data-engine="heuristic">纯启发式</button>
+        </div>
+        <div class="sliders">
+          <div class="slider-item">
+            <label><span>搜索深度</span><strong id="depthVal">6</strong></label>
+            <input type="range" id="depthSlider" min="3" max="8" step="1" value="6" />
+          </div>
+          <div class="slider-item">
+            <label><span>思考限时</span><strong id="timeVal">0.8s</strong></label>
+            <input type="range" id="timeSlider" min="0.2" max="3.0" step="0.2" value="0.8" />
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><span>操作与视图开关</span></div>
+        <div class="btn-row">
+          <button class="primary" id="btnNew">新开一局</button>
+          <button id="btnUndo">悔棋 (Z)</button>
+          <button id="btnHint">AI 提示 (H)</button>
+          <button id="btnPause">暂停互搏</button>
+        </div>
+        <div class="toggles">
+          <button id="togNums" class="active">手数</button>
+          <button id="togForb" class="active">禁手提示</button>
+          <button id="togHeat" class="active">策略热力图</button>
+          <button id="togSound" class="active">木质音效</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title"><span>黑方实时胜率曲线（点击可跳转）</span><span id="wrText">50.0%</span></div>
+        <canvas id="chartCanvas"></canvas>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <span>棋局复盘与着法记录</span>
+          <button id="btnCopy" style="padding:2px 8px;font-size:11px;">复制棋谱</button>
+        </div>
+        <div class="replay-bar">
+          <button id="btnFirst">|&lt;</button>
+          <button id="btnPrev">&lt; 上手</button>
+          <button id="btnNext">下手 &gt;</button>
+          <button id="btnLast">&gt;| 最新</button>
+        </div>
+        <div class="moves-list" id="movesList"></div>
+        <div class="kbd-hint">快捷键：← / → 复盘，Home / End 首尾手，Z 悔棋，H AI 提示</div>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    const N = 15;
+    const CELLS = N * N;
+    const COLS = "ABCDEFGHIJKLMNO";
+
+    const state = {
+      mode: "human_black",
+      engine: "v3",
+      depth: 6,
+      timeLimit: 0.8,
+      moves: [],          // { row, col, idx, player, blackWr, policy }
+      viewPly: 0,
+      board: new Array(CELLS).fill(0),
+      forbidden: new Array(CELLS).fill(0),
+      winner: 0,          // 0 ongoing, 1 black, 2 white, 3 draw
+      winLine: [],
+      blackWr: 50.0,
+      policy: [],         // [{ idx, row, col, prob }]
+      thinking: false,
+      paused: false,
+      hoverCell: -1,
+      showNums: true,
+      showForb: true,
+      showHeat: true,
+      soundOn: true,
+      lastElapsedMs: null,
+      modelsAvail: { v3: true, v2: true, heuristic: true },
+      genId: 0,
+    };
+
+    let audioCtx = null;
+    const boardCanvas = document.getElementById("boardCanvas");
+    const boardCtx = boardCanvas.getContext("2d");
+    const chartCanvas = document.getElementById("chartCanvas");
+    const chartCtx = chartCanvas.getContext("2d");
+
+    function coordName(r, c) {
+      return COLS[c] + String(N - r);
+    }
+
+    function showToast(msg) {
+      const el = document.getElementById("toast");
+      el.textContent = msg;
+      el.classList.add("show");
+      clearTimeout(showToast._tid);
+      showToast._tid = setTimeout(() => el.classList.remove("show"), 2200);
+    }
+
+    function playStoneSound() {
+      if (!state.soundOn) return;
+      try {
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioCtx.state === "suspended") audioCtx.resume();
+        const now = audioCtx.currentTime;
+
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(195, now);
+        osc.frequency.exponentialRampToValueAtTime(72, now + 0.048);
+        gain.gain.setValueAtTime(0.32, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.065);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(now);
+        osc.stop(now + 0.07);
+
+        const bufSize = Math.floor(audioCtx.sampleRate * 0.025);
+        const buf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < bufSize; i++) {
+          data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufSize * 0.28));
+        }
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = buf;
+        const bp = audioCtx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.value = 1400;
+        const ng = audioCtx.createGain();
+        ng.gain.setValueAtTime(0.18, now);
+        ng.gain.exponentialRampToValueAtTime(0.001, now + 0.025);
+        noise.connect(bp);
+        bp.connect(ng);
+        ng.connect(audioCtx.destination);
+        noise.start(now);
+      } catch (_) {}
+    }
+
+    function computeBoardAt(ply) {
+      const b = new Array(CELLS).fill(0);
+      const count = Math.max(0, Math.min(ply, state.moves.length));
+      for (let i = 0; i < count; i++) {
+        const m = state.moves[i];
+        b[m.idx] = m.player;
+      }
+      return b;
+    }
+
+    function nextPlayerAt(ply) {
+      return ply % 2 === 0 ? 1 : 2;
+    }
+
+    function lastMoveIdxAt(ply) {
+      if (ply <= 0 || ply > state.moves.length) return -1;
+      return state.moves[ply - 1].idx;
+    }
+
+    async function apiPost(url, payload) {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      return data;
+    }
+
+    async function syncBoardState(needPrior = true) {
+      const myGen = state.genId;
+      const ply = state.viewPly;
+      const board = computeBoardAt(ply);
+      const player = nextPlayerAt(ply);
+      state.board = board;
+
+      const st = await apiPost("/api/state", { board, player, need_prior: needPrior });
+      if (myGen !== state.genId || ply !== state.viewPly) return;
+
+      state.forbidden = st.forbidden || new Array(CELLS).fill(0);
+      state.winner = ply === state.moves.length ? st.winner : st.winner;
+      state.winLine = st.win_line || [];
+
+      if (ply > 0 && state.moves[ply - 1] && typeof state.moves[ply - 1].blackWr === "number") {
+        state.blackWr = state.moves[ply - 1].blackWr;
+      } else if (typeof st.black_winrate === "number") {
+        state.blackWr = st.black_winrate;
+      } else if (state.winner === 1) {
+        state.blackWr = 100.0;
+      } else if (state.winner === 2) {
+        state.blackWr = 0.0;
+      } else {
+        state.blackWr = 50.0;
+      }
+
+      if (ply > 0 && state.moves[ply - 1] && state.moves[ply - 1].policy && state.moves[ply - 1].policy.length) {
+        state.policy = state.moves[ply - 1].policy;
+      } else {
+        state.policy = st.prior_policy || [];
+      }
+
+      renderAll();
+    }
+
+    function isHumanTurn() {
+      if (state.winner !== 0 || state.viewPly !== state.moves.length) return false;
+      const p = nextPlayerAt(state.moves.length);
+      if (state.mode === "two_player") return true;
+      if (state.mode === "human_black") return p === 1;
+      if (state.mode === "human_white") return p === 2;
+      return false;
+    }
+
+    function isAiTurn() {
+      if (state.winner !== 0 || state.viewPly !== state.moves.length) return false;
+      const p = nextPlayerAt(state.moves.length);
+      if (state.mode === "ai_vs_ai") return !state.paused;
+      if (state.mode === "human_black") return p === 2;
+      if (state.mode === "human_white") return p === 1;
+      return false;
+    }
+
+    function updateStatusPill() {
+      const pill = document.getElementById("statusPill");
+      const txt = document.getElementById("statusText");
+      if (state.thinking) {
+        pill.classList.add("thinking");
+        txt.textContent = `${state.engine.toUpperCase()} 思考中`;
+      } else if (state.winner === 1) {
+        pill.classList.remove("thinking");
+        txt.textContent = "黑方胜";
+      } else if (state.winner === 2) {
+        pill.classList.remove("thinking");
+        txt.textContent = "白方胜";
+      } else if (state.winner === 3) {
+        pill.classList.remove("thinking");
+        txt.textContent = "平局";
+      } else if (state.viewPly < state.moves.length) {
+        pill.classList.remove("thinking");
+        txt.textContent = `复盘第 ${state.viewPly}/${state.moves.length} 手`;
+      } else {
+        pill.classList.remove("thinking");
+        txt.textContent = "就绪";
+      }
+    }
+
+    async function maybeTriggerAiMove() {
+      if (state.thinking || !isAiTurn()) return;
+      const myGen = state.genId;
+      const ply = state.moves.length;
+      const player = nextPlayerAt(ply);
+      const board = computeBoardAt(ply);
+      const lastMove = lastMoveIdxAt(ply);
+
+      state.thinking = true;
+      updateStatusPill();
+      try {
+        const res = await apiPost("/api/move", {
+          board,
+          player,
+          last_move: lastMove,
+          engine: state.engine,
+          depth: state.depth,
+          time_limit: state.timeLimit,
+          vcf_depth: 14,
+        });
+        if (myGen !== state.genId) return;
+
+        const mv = {
+          row: res.row,
+          col: res.col,
+          idx: res.move_idx,
+          player,
+          blackWr: res.black_winrate,
+          policy: res.policy || [],
+        };
+        state.moves.push(mv);
+        state.viewPly = state.moves.length;
+        state.board = computeBoardAt(state.viewPly);
+        state.forbidden = res.forbidden_after || new Array(CELLS).fill(0);
+        state.winner = res.winner || 0;
+        state.winLine = res.win_line || [];
+        state.blackWr = typeof res.black_winrate === "number" ? res.black_winrate : state.blackWr;
+        state.policy = res.policy || [];
+        state.lastElapsedMs = res.elapsed_ms;
+        playStoneSound();
+        renderAll();
+
+        if (state.winner === 1) showToast("黑方五连获胜！");
+        else if (state.winner === 2) showToast("白方五连获胜！");
+        else if (state.winner === 3) showToast("棋盘已满，和棋！");
+      } catch (err) {
+        showToast("引擎异常: " + err.message);
+      } finally {
+        state.thinking = false;
+        updateStatusPill();
+        if (myGen === state.genId && isAiTurn()) {
+          setTimeout(maybeTriggerAiMove, state.mode === "ai_vs_ai" ? 180 : 30);
+        }
+      }
+    }
+
+    async function placeHumanStone(r, c) {
+      if (state.thinking) return;
+      if (state.viewPly !== state.moves.length) {
+        showToast("当前处于历史复盘，请先点 >| 回到最新手");
+        return;
+      }
+      if (!isHumanTurn()) return;
+      const idx = r * N + c;
+      if (state.board[idx] !== 0) return;
+
+      const player = nextPlayerAt(state.moves.length);
+      if (player === 1 && state.forbidden[idx]) {
+        showToast(`禁手点位 (${coordName(r, c)})：黑方三三/四四/长连禁手不可落子`);
+        return;
+      }
+
+      state.moves.push({ row: r, col: c, idx, player, blackWr: null, policy: [] });
+      state.viewPly = state.moves.length;
+      state.lastElapsedMs = null;
+      playStoneSound();
+      await syncBoardState(true);
+
+      if (state.winner === 1) showToast("黑方五连获胜！");
+      else if (state.winner === 2) showToast("白方五连获胜！");
+      else if (state.winner === 3) showToast("和棋！");
+      else maybeTriggerAiMove();
+    }
+
+    async function triggerHint() {
+      if (state.thinking || state.winner !== 0) return;
+      const myGen = state.genId;
+      const ply = state.viewPly;
+      const player = nextPlayerAt(ply);
+      const board = computeBoardAt(ply);
+      const lastMove = lastMoveIdxAt(ply);
+
+      state.thinking = true;
+      updateStatusPill();
+      try {
+        const res = await apiPost("/api/analyze", {
+          board,
+          player,
+          last_move: lastMove,
+          engine: state.engine,
+          depth: state.depth,
+          time_limit: state.timeLimit,
+          vcf_depth: 14,
+        });
+        if (myGen !== state.genId) return;
+        state.blackWr = res.black_winrate;
+        state.policy = res.policy || [];
+        state.lastElapsedMs = res.elapsed_ms;
+        if (ply > 0 && state.moves[ply - 1]) {
+          state.moves[ply - 1].blackWr = res.black_winrate;
+        }
+        renderAll();
+        if (res.best_row >= 0) {
+          showToast(`AI 建议：${coordName(res.best_row, res.best_col)}（黑胜率 ${res.black_winrate.toFixed(1)}%）`);
+        }
+      } catch (err) {
+        showToast("分析失败: " + err.message);
+      } finally {
+        state.thinking = false;
+        updateStatusPill();
+      }
+    }
+
+    async function newGame() {
+      state.genId += 1;
+      state.thinking = false;
+      state.moves = [];
+      state.viewPly = 0;
+      state.board = new Array(CELLS).fill(0);
+      state.forbidden = new Array(CELLS).fill(0);
+      state.winner = 0;
+      state.winLine = [];
+      state.blackWr = 50.0;
+      state.policy = [];
+      state.lastElapsedMs = null;
+      await syncBoardState(true);
+      maybeTriggerAiMove();
+    }
+
+    async function undoMove() {
+      if (state.thinking || state.moves.length === 0) return;
+      state.genId += 1;
+      let popCount = 1;
+      if ((state.mode === "human_black" || state.mode === "human_white") && state.moves.length >= 2) {
+        const lastPlayer = state.moves[state.moves.length - 1].player;
+        const aiPlayer = state.mode === "human_black" ? 2 : 1;
+        if (lastPlayer === aiPlayer) popCount = 2;
+      }
+      state.moves.splice(Math.max(0, state.moves.length - popCount), popCount);
+      state.viewPly = state.moves.length;
+      state.winner = 0;
+      state.winLine = [];
+      await syncBoardState(true);
+    }
+
+    async function setViewPly(ply) {
+      if (state.thinking) return;
+      const target = Math.max(0, Math.min(state.moves.length, ply));
+      if (target === state.viewPly) return;
+      state.viewPly = target;
+      await syncBoardState(true);
+    }
+
+    function drawBoard() {
+      const rect = boardCanvas.getBoundingClientRect();
+      const cssSize = Math.max(300, Math.round(rect.width));
+      const dpr = window.devicePixelRatio || 1;
+      if (boardCanvas.width !== Math.round(cssSize * dpr) || boardCanvas.height !== Math.round(cssSize * dpr)) {
+        boardCanvas.width = Math.round(cssSize * dpr);
+        boardCanvas.height = Math.round(cssSize * dpr);
+      }
+      const ctx = boardCtx;
+      ctx.save();
+      ctx.scale(dpr, dpr);
+
+      const pad = cssSize * 0.072;
+      const span = cssSize - pad * 2;
+      const step = span / (N - 1);
+
+      // Rich Kaya wood surface
+      const bg = ctx.createLinearGradient(0, 0, cssSize, cssSize);
+      bg.addColorStop(0, "#ddb26e");
+      bg.addColorStop(0.5, "#d2a25a");
+      bg.addColorStop(1, "#c59148");
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, cssSize, cssSize);
+
+      // Subtle wood grain lines
+      ctx.strokeStyle = "rgba(110, 62, 16, 0.055)";
+      ctx.lineWidth = 1.1;
+      for (let i = 0; i < cssSize; i += 6) {
+        ctx.beginPath();
+        ctx.moveTo(0, i);
+        ctx.bezierCurveTo(cssSize * 0.35, i + Math.sin(i * 0.08) * 3, cssSize * 0.7, i - Math.cos(i * 0.06) * 3, cssSize, i);
+        ctx.stroke();
+      }
+
+      // Outer border frame
+      ctx.strokeStyle = "rgba(74, 42, 12, 0.65)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(pad - 6, pad - 6, span + 12, span + 12);
+
+      // Grid lines
+      ctx.strokeStyle = "#3f2812";
+      for (let i = 0; i < N; i++) {
+        const pos = pad + i * step;
+        ctx.lineWidth = (i === 0 || i === N - 1) ? 1.5 : 1.0;
+        ctx.beginPath();
+        ctx.moveTo(pad, pos);
+        ctx.lineTo(pad + span, pos);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(pos, pad);
+        ctx.lineTo(pos, pad + span);
+        ctx.stroke();
+      }
+
+      // Star points
+      const stars = [[3,3],[3,11],[7,7],[11,3],[11,11]];
+      ctx.fillStyle = "#331f0c";
+      for (const [sr, sc] of stars) {
+        ctx.beginPath();
+        ctx.arc(pad + sc * step, pad + sr * step, Math.max(3.2, step * 0.11), 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Coordinates
+      ctx.fillStyle = "rgba(56, 33, 12, 0.85)";
+      ctx.font = `600 ${Math.max(10, Math.round(step * 0.34))}px -apple-system, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      for (let i = 0; i < N; i++) {
+        const p = pad + i * step;
+        ctx.fillText(COLS[i], p, pad * 0.44);
+        ctx.fillText(COLS[i], p, cssSize - pad * 0.42);
+        const rowTxt = String(N - i);
+        ctx.fillText(rowTxt, pad * 0.42, p);
+        ctx.fillText(rowTxt, cssSize - pad * 0.42, p);
+      }
+
+      // Policy heatmap (under hover, on empty cells)
+      if (state.showHeat && state.policy.length && state.winner === 0) {
+        for (const item of state.policy) {
+          if (state.board[item.idx] !== 0) continue;
+          const prob = item.prob;
+          if (prob < 0.015) continue;
+          const x = pad + item.col * step;
+          const y = pad + item.row * step;
+          const rad = step * (0.28 + Math.min(0.20, prob * 0.45));
+          ctx.save();
+          ctx.fillStyle = prob >= 0.20
+            ? `rgba(46, 204, 138, ${Math.min(0.62, 0.22 + prob * 0.7)})`
+            : `rgba(52, 168, 224, ${Math.min(0.45, 0.16 + prob * 0.6)})`;
+          ctx.beginPath();
+          ctx.arc(x, y, rad, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = prob >= 0.20 ? "rgba(18, 120, 78, 0.85)" : "rgba(32, 96, 150, 0.65)";
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+          ctx.fillStyle = "#11161d";
+          ctx.font = `700 ${Math.max(9, Math.round(step * 0.25))}px -apple-system, sans-serif`;
+          ctx.fillText(Math.round(prob * 100) + "%", x, y + 0.5);
+          ctx.restore();
+        }
+      }
+
+      // Forbidden markers (Black's turn only)
+      const curPlayer = nextPlayerAt(state.viewPly);
+      if (state.showForb && curPlayer === 1 && state.winner === 0) {
+        ctx.strokeStyle = "rgba(210, 38, 48, 0.9)";
+        ctx.lineWidth = 2.1;
+        const arm = step * 0.20;
+        for (let i = 0; i < CELLS; i++) {
+          if (state.board[i] === 0 && state.forbidden[i]) {
+            const r = Math.floor(i / N);
+            const c = i % N;
+            const x = pad + c * step;
+            const y = pad + r * step;
+            ctx.beginPath();
+            ctx.moveTo(x - arm, y - arm);
+            ctx.lineTo(x + arm, y + arm);
+            ctx.moveTo(x + arm, y - arm);
+            ctx.lineTo(x - arm, y + arm);
+            ctx.stroke();
+          }
+        }
+      }
+
+      // Hover ghost stone
+      if (state.hoverCell >= 0 && isHumanTurn() && !state.thinking && state.board[state.hoverCell] === 0) {
+        const hr = Math.floor(state.hoverCell / N);
+        const hc = state.hoverCell % N;
+        if (!(curPlayer === 1 && state.forbidden[state.hoverCell])) {
+          const hx = pad + hc * step;
+          const hy = pad + hr * step;
+          ctx.save();
+          ctx.globalAlpha = 0.48;
+          ctx.fillStyle = curPlayer === 1 ? "#14161c" : "#f7f8fb";
+          ctx.beginPath();
+          ctx.arc(hx, hy, step * 0.44, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      // Stones
+      const stoneR = step * 0.455;
+      const plyMap = new Map();
+      for (let i = 0; i < state.viewPly; i++) {
+        plyMap.set(state.moves[i].idx, i + 1);
+      }
+      const lastIdx = lastMoveIdxAt(state.viewPly);
+
+      for (let i = 0; i < CELLS; i++) {
+        const cell = state.board[i];
+        if (cell === 0) continue;
+        const r = Math.floor(i / N);
+        const c = i % N;
+        const x = pad + c * step;
+        const y = pad + r * step;
+
+        // Shadow
+        ctx.save();
+        ctx.fillStyle = "rgba(0, 0, 0, 0.38)";
+        ctx.beginPath();
+        ctx.arc(x + 1.6, y + 2.4, stoneR, 0, Math.PI * 2);
+        ctx.fill();
+
+        const g = ctx.createRadialGradient(
+          x - stoneR * 0.34,
+          y - stoneR * 0.34,
+          stoneR * 0.08,
+          x,
+          y,
+          stoneR
+        );
+        if (cell === 1) {
+          g.addColorStop(0, "#5a6070");
+          g.addColorStop(0.35, "#23262f");
+          g.addColorStop(1, "#090a0d");
+        } else {
+          g.addColorStop(0, "#ffffff");
+          g.addColorStop(0.68, "#eceef4");
+          g.addColorStop(1, "#bfc6d4");
+        }
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x, y, stoneR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        if (i === lastIdx) {
+          ctx.strokeStyle = "#e2b66d";
+          ctx.lineWidth = 2.0;
+          ctx.beginPath();
+          ctx.arc(x, y, stoneR * 0.72, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        if (state.showNums) {
+          const num = plyMap.get(i);
+          if (num) {
+            ctx.fillStyle = cell === 1 ? (i === lastIdx ? "#ffe1a3" : "#e2e6f0") : (i === lastIdx ? "#b05514" : "#242834");
+            ctx.font = `700 ${Math.max(9, Math.round(step * (num >= 100 ? 0.28 : 0.32)))}px -apple-system, sans-serif`;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(String(num), x, y + 0.5);
+          }
+        }
+      }
+
+      // Winning line highlight
+      if (state.winLine && state.winLine.length >= 5) {
+        const first = state.winLine[0];
+        const last = state.winLine[state.winLine.length - 1];
+        ctx.save();
+        ctx.strokeStyle = "rgba(255, 214, 102, 0.92)";
+        ctx.lineWidth = 4.2;
+        ctx.lineCap = "round";
+        ctx.shadowColor = "rgba(255, 214, 102, 0.85)";
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.moveTo(pad + first[1] * step, pad + first[0] * step);
+        ctx.lineTo(pad + last[1] * step, pad + last[0] * step);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      ctx.restore();
+    }
+
+    function drawChart() {
+      const rect = chartCanvas.getBoundingClientRect();
+      const w = Math.max(200, Math.round(rect.width));
+      const h = Math.max(90, Math.round(rect.height));
+      const dpr = window.devicePixelRatio || 1;
+      if (chartCanvas.width !== Math.round(w * dpr) || chartCanvas.height !== Math.round(h * dpr)) {
+        chartCanvas.width = Math.round(w * dpr);
+        chartCanvas.height = Math.round(h * dpr);
+      }
+      const ctx = chartCtx;
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, h);
+
+      const padX = 10;
+      const padY = 10;
+      const cw = w - padX * 2;
+      const ch = h - padY * 2;
+
+      // Midline 50%
+      ctx.strokeStyle = "rgba(226, 182, 109, 0.28)";
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(padX, padY + ch * 0.5);
+      ctx.lineTo(padX + cw, padY + ch * 0.5);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const points = [50.0];
+      for (const m of state.moves) {
+        points.push(typeof m.blackWr === "number" ? m.blackWr : points[points.length - 1]);
+      }
+      const nPts = points.length;
+      if (nPts >= 2) {
+        ctx.strokeStyle = "#e2b66d";
+        ctx.lineWidth = 2.0;
+        ctx.beginPath();
+        for (let i = 0; i < nPts; i++) {
+          const x = padX + (i / Math.max(1, nPts - 1)) * cw;
+          const y = padY + (1 - points[i] / 100) * ch;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      // Active ply marker
+      const ax = padX + (state.viewPly / Math.max(1, nPts - 1)) * cw;
+      const ay = padY + (1 - points[Math.min(state.viewPly, nPts - 1)] / 100) * ch;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+      ctx.beginPath();
+      ctx.moveTo(ax, padY);
+      ctx.lineTo(ax, padY + ch);
+      ctx.stroke();
+      ctx.fillStyle = "#44cf94";
+      ctx.beginPath();
+      ctx.arc(ax, ay, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function renderSidebar() {
+      const p = nextPlayerAt(state.viewPly);
+      const ico = document.getElementById("turnStoneIcon");
+      ico.className = "stone-ico " + (p === 1 ? "black" : "white");
+      const lbl = document.getElementById("turnLabel");
+      if (state.winner === 1) lbl.textContent = `黑方胜 · 共 ${state.moves.length} 手`;
+      else if (state.winner === 2) lbl.textContent = `白方胜 · 共 ${state.moves.length} 手`;
+      else if (state.winner === 3) lbl.textContent = `和棋 · 共 ${state.moves.length} 手`;
+      else lbl.textContent = `${p === 1 ? "黑方" : "白方"}行棋 · 手数 ${state.viewPly}`;
+
+      document.getElementById("evalMeta").textContent =
+        state.lastElapsedMs !== null ? `耗时 ${state.lastElapsedMs} ms` : "耗时 — ms";
+      document.getElementById("viewBadge").textContent =
+        state.viewPly < state.moves.length ? `复盘 ${state.viewPly}/${state.moves.length}` : "实时对局";
+
+      const wr = Math.max(0, Math.min(100, state.blackWr));
+      document.getElementById("winbarBlack").style.height = wr.toFixed(1) + "%";
+      document.getElementById("blackPctLabel").innerHTML = `黑<br>${wr.toFixed(0)}%`;
+      document.getElementById("whitePctLabel").innerHTML = `白<br>${(100 - wr).toFixed(0)}%`;
+      document.getElementById("wrText").textContent = `黑 ${wr.toFixed(1)}%`;
+
+      document.getElementById("btnPause").disabled = state.mode !== "ai_vs_ai";
+      document.getElementById("btnPause").textContent = state.paused ? "继续互搏" : "暂停互搏";
+
+      const list = document.getElementById("movesList");
+      list.innerHTML = "";
+      state.moves.forEach((m, idx) => {
+        const chip = document.createElement("span");
+        chip.className = "move-chip" + (idx + 1 === state.viewPly ? " active" : "");
+        chip.innerHTML = `<span class="dot ${m.player === 1 ? "b" : "w"}"></span>${idx + 1}.${coordName(m.row, m.col)}`;
+        chip.onclick = () => setViewPly(idx + 1);
+        list.appendChild(chip);
+      });
+      if (list.lastChild && state.viewPly === state.moves.length) {
+        list.scrollTop = list.scrollHeight;
+      }
+
+      updateStatusPill();
+    }
+
+    function renderAll() {
+      drawBoard();
+      drawChart();
+      renderSidebar();
+    }
+
+    function canvasToCell(evt) {
+      const rect = boardCanvas.getBoundingClientRect();
+      const x = evt.clientX - rect.left;
+      const y = evt.clientY - rect.top;
+      const pad = rect.width * 0.072;
+      const step = (rect.width - pad * 2) / (N - 1);
+      const col = Math.round((x - pad) / step);
+      const row = Math.round((y - pad) / step);
+      if (row < 0 || row >= N || col < 0 || col >= N) return -1;
+      const dx = x - (pad + col * step);
+      const dy = y - (pad + row * step);
+      if (Math.hypot(dx, dy) > step * 0.48) return -1;
+      return row * N + col;
+    }
+
+    boardCanvas.addEventListener("mousemove", (e) => {
+      const idx = canvasToCell(e);
+      if (idx !== state.hoverCell) {
+        state.hoverCell = idx;
+        drawBoard();
+      }
+    });
+    boardCanvas.addEventListener("mouseleave", () => {
+      if (state.hoverCell !== -1) {
+        state.hoverCell = -1;
+        drawBoard();
+      }
+    });
+    boardCanvas.addEventListener("click", (e) => {
+      const idx = canvasToCell(e);
+      if (idx >= 0) placeHumanStone(Math.floor(idx / N), idx % N);
+    });
+
+    chartCanvas.addEventListener("click", (e) => {
+      if (state.moves.length === 0) return;
+      const rect = chartCanvas.getBoundingClientRect();
+      const relX = Math.max(0, Math.min(1, (e.clientX - rect.left - 10) / Math.max(1, rect.width - 20)));
+      const ply = Math.round(relX * state.moves.length);
+      setViewPly(ply);
+    });
+
+    document.querySelectorAll("#modeGroup button").forEach((btn) => {
+      btn.onclick = () => {
+        if (state.thinking) return;
+        document.querySelectorAll("#modeGroup button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        state.mode = btn.dataset.mode;
+        state.paused = false;
+        renderSidebar();
+        maybeTriggerAiMove();
+      };
+    });
+
+    document.querySelectorAll("#engineGroup button").forEach((btn) => {
+      btn.onclick = () => {
+        if (btn.disabled) return;
+        document.querySelectorAll("#engineGroup button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        state.engine = btn.dataset.engine;
+        updateStatusPill();
+      };
+    });
+
+    document.getElementById("depthSlider").oninput = (e) => {
+      state.depth = Number(e.target.value);
+      document.getElementById("depthVal").textContent = String(state.depth);
+    };
+    document.getElementById("timeSlider").oninput = (e) => {
+      state.timeLimit = Number(e.target.value);
+      document.getElementById("timeVal").textContent = state.timeLimit.toFixed(1) + "s";
+    };
+
+    document.getElementById("btnNew").onclick = newGame;
+    document.getElementById("btnUndo").onclick = undoMove;
+    document.getElementById("btnHint").onclick = triggerHint;
+    document.getElementById("btnPause").onclick = () => {
+      state.paused = !state.paused;
+      renderSidebar();
+      if (!state.paused) maybeTriggerAiMove();
+    };
+
+    document.getElementById("togNums").onclick = (e) => {
+      state.showNums = !state.showNums;
+      e.target.classList.toggle("active", state.showNums);
+      drawBoard();
+    };
+    document.getElementById("togForb").onclick = (e) => {
+      state.showForb = !state.showForb;
+      e.target.classList.toggle("active", state.showForb);
+      drawBoard();
+    };
+    document.getElementById("togHeat").onclick = (e) => {
+      state.showHeat = !state.showHeat;
+      e.target.classList.toggle("active", state.showHeat);
+      drawBoard();
+    };
+    document.getElementById("togSound").onclick = (e) => {
+      state.soundOn = !state.soundOn;
+      e.target.classList.toggle("active", state.soundOn);
+    };
+
+    document.getElementById("btnFirst").onclick = () => setViewPly(0);
+    document.getElementById("btnPrev").onclick = () => setViewPly(state.viewPly - 1);
+    document.getElementById("btnNext").onclick = () => setViewPly(state.viewPly + 1);
+    document.getElementById("btnLast").onclick = () => setViewPly(state.moves.length);
+
+    document.getElementById("btnCopy").onclick = async () => {
+      const coords = state.moves.map((m, i) => `${i + 1}.${coordName(m.row, m.col)}`).join(" ");
+      try {
+        await navigator.clipboard.writeText(coords || "(空棋盘)");
+        showToast("已复制坐标棋谱到剪贴板");
+      } catch (_) {
+        showToast("棋谱：" + (coords || "空"));
+      }
+    };
+
+    window.addEventListener("keydown", (e) => {
+      if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
+      if (e.key === "ArrowLeft") { e.preventDefault(); setViewPly(state.viewPly - 1); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); setViewPly(state.viewPly + 1); }
+      else if (e.key === "Home") { e.preventDefault(); setViewPly(0); }
+      else if (e.key === "End") { e.preventDefault(); setViewPly(state.moves.length); }
+      else if (e.key === "z" || e.key === "Z") { e.preventDefault(); undoMove(); }
+      else if (e.key === "h" || e.key === "H") { e.preventDefault(); triggerHint(); }
+    });
+
+    window.addEventListener("resize", () => renderAll());
+
+    async function bootstrap() {
+      try {
+        const resp = await fetch("/api/info");
+        const info = await resp.json();
+        state.modelsAvail = info.models || {};
+        const libName = (info.lib_path || "").split(/[\\/]/).pop();
+        document.getElementById("libInfo").textContent = `引擎库：${libName}`;
+        document.querySelectorAll("#engineGroup button").forEach((btn) => {
+          const k = btn.dataset.engine;
+          if (!state.modelsAvail[k]) btn.disabled = true;
+        });
+      } catch (err) {
+        document.getElementById("libInfo").textContent = "连接失败";
+      }
+      await syncBoardState(true);
+    }
+
+    bootstrap();
+  </script>
+</body>
+</html>

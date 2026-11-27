@@ -194,6 +194,34 @@ static void test_block_open_three(void) {
     CHECK(res.best_move.row == 7 && (res.best_move.col == 5 || res.best_move.col == 9));
 }
 
+static void test_pvs_root_verification_avoids_blunder(void) {
+    /* 白方存在活三 (7,6)(7,7)(7,8)，黑方若不堵 (7,5) 或 (7,9) 将在 2 步内被成活四必败。
+       启用 temperature > 0 验证根节点精确验证后，策略分布绝不把高概率分给漏防着法。 */
+    Board board;
+    board_init(&board);
+    board.cells[7][6] = CELL_WHITE;
+    board.cells[7][7] = CELL_WHITE;
+    board.cells[7][8] = CELL_WHITE;
+    board.cells[4][4] = CELL_BLACK;
+    board.cells[4][5] = CELL_BLACK;
+    board.cells[10][10] = CELL_BLACK;
+
+    SearchConfig cfg = search_default_config();
+    cfg.max_depth = 4;
+    cfg.time_limit_sec = 2.0;
+    cfg.temperature = 0.85f;
+    cfg.seed = 99ULL;
+
+    Move last = {7, 8};
+    SearchResult res = search_find_best_move(&board, CELL_BLACK, last, &cfg, NULL, NULL);
+    CHECK(res.valid);
+    CHECK(res.best_move.row == 7 && (res.best_move.col == 5 || res.best_move.col == 9));
+
+    float safe_mass = res.root_policy[7 * BOARD_SIZE + 5]
+                    + res.root_policy[7 * BOARD_SIZE + 9];
+    CHECK(safe_mass > 0.95f);
+}
+
 int main(void) {
     test_board_undo_and_rule_probes();
     test_search_immediate_win();
@@ -203,6 +231,7 @@ int main(void) {
     test_zobrist_consistency();
     test_vcf_three_step_win();
     test_block_open_three();
+    test_pvs_root_verification_avoids_blunder();
 
     if (failures != 0) {
         fprintf(stderr, "%d AI test(s) failed.\n", failures);

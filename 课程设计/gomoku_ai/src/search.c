@@ -777,8 +777,10 @@ SearchResult search_find_best_move(
     Move best_move = root_moves[0];
     int best_score = 0;
     int root_scores[28];
+    bool root_exact[28];
     for (int i = 0; i < root_count; ++i) {
         root_scores[i] = eval_move_heuristic(board, root_moves[i].row, root_moves[i].col, player);
+        root_exact[i] = false;
     }
 
     int completed_depth = 0;
@@ -798,6 +800,9 @@ SearchResult search_find_best_move(
                 int tmp_s = root_scores[0];
                 root_scores[0] = root_scores[i];
                 root_scores[i] = tmp_s;
+                bool tmp_e = root_exact[0];
+                root_exact[0] = root_exact[i];
+                root_exact[i] = tmp_e;
                 break;
             }
         }
@@ -805,6 +810,7 @@ SearchResult search_find_best_move(
         int iter_best_score = -EVAL_MATE_SCORE * 2;
         Move iter_best_move = root_moves[0];
         int iter_scores[28];
+        bool iter_exact[28];
         int alpha = -EVAL_MATE_SCORE * 2;
         int beta = EVAL_MATE_SCORE * 2;
 
@@ -814,12 +820,15 @@ SearchResult search_find_best_move(
             state.zobrist ^= g_zobrist_stone[m.row][m.col][player] ^ g_zobrist_side;
 
             int score;
+            bool exact = false;
             if (i == 0) {
                 score = -negamax(board, opp, depth - 1, 1, -beta, -alpha, &state);
+                exact = true;
             } else {
                 score = -negamax(board, opp, depth - 1, 1, -alpha - 1, -alpha, &state);
                 if (!state.time_up && score > alpha && score < beta) {
                     score = -negamax(board, opp, depth - 1, 1, -beta, -alpha, &state);
+                    exact = true;
                 }
             }
 
@@ -831,6 +840,7 @@ SearchResult search_find_best_move(
             }
 
             iter_scores[i] = score;
+            iter_exact[i] = exact;
             if (score > iter_best_score) {
                 iter_best_score = score;
                 iter_best_move = m;
@@ -849,6 +859,7 @@ SearchResult search_find_best_move(
         completed_depth = depth;
         for (int i = 0; i < root_count; ++i) {
             root_scores[i] = iter_scores[i];
+            root_exact[i] = iter_exact[i];
         }
 
         if (best_score >= MATE_BOUND) {
@@ -856,12 +867,70 @@ SearchResult search_find_best_move(
         }
     }
 
+    /*
+     * PVS 零窗口 fail-low 着法仅返回上界，可能隐藏致命漏招。
+     * 在启用 CNN 价值融合或温度采样时，用安全下界窗口对前列候选做一次精确重搜验证。
+     */
+    if (completed_depth >= 1
+        && ((active_cnn && cfg.cnn_value_weight > 0.01f) || cfg.temperature > 0.01f)
+        && best_score < MATE_BOUND && best_score > -MATE_BOUND
+        && (now_seconds() - start_time) < budget * 0.88) {
+        int verify_budget = 6;
+        int verified_non_exact = 0;
+        int safe_floor = best_score - 15000;
+        int safe_ceil = best_score + 1;
+
+        for (int i = 0; i < root_count; ++i) {
+            if (root_exact[i]) {
+                continue;
+            }
+            if (verified_non_exact >= verify_budget
+                || (now_seconds() - start_time) >= budget * 0.90) {
+                /* 未经精确验证的 fail-low 着法压低分数，避免被策略或融合误选 */
+                if (root_scores[i] > best_score - 20000) {
+                    root_scores[i] = best_score - 20000;
+                }
+                continue;
+            }
+
+            Move m = root_moves[i];
+            state.time_up = false;
+            board_place(board, m.row, m.col, player);
+            state.zobrist ^= g_zobrist_stone[m.row][m.col][player] ^ g_zobrist_side;
+
+            int vscore = -negamax(
+                board, opp, completed_depth - 1, 1, -safe_ceil, -safe_floor, &state
+            );
+
+            state.zobrist ^= g_zobrist_stone[m.row][m.col][player] ^ g_zobrist_side;
+            board_undo(board, m.row, m.col);
+            ++verified_non_exact;
+
+            if (state.time_up) {
+                root_scores[i] = best_score - 20000;
+                continue;
+            }
+
+            if (vscore <= safe_floor) {
+                /* 确认为大漏招/明显劣招，严格压低分数并保持非精确标记 */
+                root_scores[i] = best_score - 25000;
+            } else {
+                root_scores[i] = vscore;
+                root_exact[i] = true;
+                if (vscore > best_score) {
+                    best_score = vscore;
+                    best_move = m;
+                }
+            }
+        }
+    }
+
     free(tt);
 
-    /* Layer 3B：对非杀棋局面，使用 CNN Value 头对顶尖候选着法进行全局价值融合 */
+    /* Layer 3B：对非杀棋局面，仅对通过精确窗口验证的顶尖候选着法进行 CNN 价值融合 */
     if (active_cnn && cfg.cnn_value_weight > 0.01f
         && best_score < MATE_BOUND && best_score > -MATE_BOUND
-        && (now_seconds() - start_time) < budget * 0.90) {
+        && (now_seconds() - start_time) < budget * 0.92) {
         int order[28];
         for (int i = 0; i < root_count; ++i) {
             order[i] = i;
@@ -883,11 +952,14 @@ SearchResult search_find_best_move(
         float best_blended = -1e9f;
         for (int k = 0; k < eval_k; ++k) {
             int idx = order[k];
+            if (!root_exact[idx]) {
+                continue;
+            }
             if (root_scores[idx] <= -MATE_BOUND || root_scores[idx] >= MATE_BOUND) {
                 continue;
             }
-            /* 不挑选明显逊于最优分支超过 15000 分的坏棋 */
-            if (best_score - root_scores[idx] > 15000) {
+            /* 不挑选明显逊于最优分支超过 12000 分的坏棋 */
+            if (best_score - root_scores[idx] > 12000) {
                 continue;
             }
 

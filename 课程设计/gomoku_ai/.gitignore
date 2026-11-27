@@ -12,5 +12,6 @@
 
 # Local model files and large training artifacts
 models/
+!models/*.bin
 checkpoints/
 training-data/

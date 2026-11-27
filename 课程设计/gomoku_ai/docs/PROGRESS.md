@@ -4,7 +4,9 @@
 
 ## 当前阶段
 
-已完成 **V3 单网增量 Pattern-NNUE（`GPN1`）10 轮 RTX 4070 自博弈训练与阶段 5 全阶梯验收**：
+已完成 **V3 单网增量 Pattern-NNUE（`GPN1`）10 轮 RTX 4070 自博弈训练与阶段 5 全阶梯验收**，并已**交付纯 C11 原生桌面 GUI（`gomoku_gui`）且开启 V3 第 11～22 轮加训**：
+- **桌面图形界面**：基于 `raylib 5.5`（CMake `FetchContent` 自动拉取静态链接）新增 `gomoku_gui`，支持高分屏木质棋盘、黑方禁手红 `✕` 实时提示、非阻塞后台 AI 线程、实时胜率条、引擎热切换（`V3 PNNUE` / `V2 Dual` / `Heur`）、悔棋、AI 提示与棋谱导出。
+- **V3 加训进行中（Win4070 R11～R22）**：从 Round 10 断点续训 `12` 轮（`lr=3e-4`、`epochs=10`、`MaxBuffer=200,000`、`GateThresh=0.505`，并开启每轮 `160` 局 `60ms` Rapfi 蒸馏），通过 Mac 监控台 `8766` 实时追踪。
 - 最终部署 `models/pnnue.bin`（`5.4 MB`，Round 4 门控晋级冠军），并在本地保留 V2+Rapfi 双网权重（`models/nnue.bin` 49 KB + `models/cnn.bin` 720 KB），`gomoku_ai` 支持 V3 优先加载、V2 备选与 `--no-nn` 纯手工启发式降级。
 - 在 Win4070 统一阶段 5 阶梯评测（共 276 局，`0` 非法落子）中，V3 在同深度 `depth=5` 下以 **59.4% (38-26)** 击败纯启发式、对 V1（`depth=4`）取得 **51.6% (33-31)**、对 V2+Rapfi（`depth=4`）取得 **57.8% (37-27)**；同深度 `depth=5` 对阵 V2+Rapfi 为 **37.5% (24-40)**，对阵职业级引擎 Rapfi 250615（`80ms`）为 **0-20**。
 - Mac 本地 Release + Debug（ASan/UBSan）CTest、`--verify-only`（误差 `< 1.2e-7`）、离线 `--ai-vs-ai` 对局及 `--no-nn` 降级均验证通过。
@@ -62,6 +64,11 @@
 - 当前双三和双四采用基础威胁枚举，尚未覆盖完整连珠的全部递归例外。
 
 ## 变更日志
+
+### 2026-11-27（原生 `raylib` 桌面 GUI 与 V3 R11～R22 加训启动）
+
+- 新增纯 C11 跨平台桌面图形界面 `src/gui_main.c` 与 CMake `BUILD_GUI` 选项（自动 `FetchContent` 拉取静态链接 `raylib 5.5`），`-Wall -Wextra -Wpedantic` 零警告通过编译并在 Apple M4 实机启动加载全部 `V3 / V2` 权重。
+- 在 Win4070 启动 V3 第 11～22 轮加训（`train_pnnue.py` 修复 `--resume` 轮次续接并对齐同深度 `vs_v2` 评测；`12` 轮、`lr=3e-4`、`epochs=10`、`MaxBuffer=200,000`、`GateThresh=0.505`、每轮 `160` 局 `60ms` Rapfi 蒸馏）。
 
 ### 2026-11-27（V3 Pattern-NNUE 完整训练、关键 Bug 修复与阶段 5 验收）
 

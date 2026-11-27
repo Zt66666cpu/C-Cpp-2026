@@ -25,15 +25,17 @@
 
 ## 当前状态
 
-- 阶段：已完成 M1 规则内核、M2 搜索底座、M3/M4（迭代加深 + Zobrist 置换表 + PVS + VCF 杀棋）与 M5 路线三双神经网络纯 C11 推理，当前正由外部 4070 训练流持续迭代权重。
-- 已完成：15×15 棋盘与禁手规则、Alpha-Beta + VCF 搜索、纯 C11 NNUE-Lite & Policy-Value CNN 推理、悔棋（`u`/`undo`）、可复盘棋谱保存（`--save-record`）以及双构建（Debug ASan+UBSan / Release `-O3`）全量 CTest。
-- 尚未完成：可选图形界面（GUI）与最终课堂提交接口打包确认。
+- 阶段：已完成 M1～M5 全流程与 **V3 单网增量 Pattern-NNUE（`GPN1`）+ 原生 `raylib` 桌面 GUI（`gomoku_gui`）**，目前正在 Windows RTX 4070 上进行 V3 第 11～22 轮加训。
+- 已完成：15×15 棋盘与禁手规则、Alpha-Beta + VCF 搜索、V3 Pattern-NNUE & V2 双网纯 C11 推理、`raylib 5.5` 桌面图形界面、悔棋、可复盘棋谱保存以及双构建全量 CTest。
+- 尚未完成：最终课堂提交接口打包确认。
 
 课程仓库：<https://github.com/Zt66666cpu/C-Cpp-2026>
 
 ## 构建与运行
 
-用 CLion 打开本项目目录并重新加载 `CMakeLists.txt`，选择 `gomoku_ai` 构建目标运行。
+用 CLion 打开本项目目录并重新加载 `CMakeLists.txt`：
+- 选择 **`gomoku_gui`** 目标运行 **原生桌面图形界面**（基于 `raylib 5.5` 自动静态构建，支持鼠标点击落子、黑方禁手红 `✕` 提示、V3/V2/启发式热切换、悔棋、AI 提示与实时胜率条；若无需 GUI 可加 `-DBUILD_GUI=OFF`）。
+- 选择 **`gomoku_ai`** 目标运行命令行终端版本。
 
 交互命令：
 - 输入 `行 列` 落子，范围为 `1～15`，例如 `8 8`；
@@ -48,9 +50,10 @@
 当前 macOS 命令行环境没有全局 `cmake`，CLion 可使用其内置 CMake。若终端已安装 CMake，也可执行：
 
 ```sh
-cmake -S . -B cmake-build-debug
-cmake --build cmake-build-debug
-./cmake-build-debug/gomoku_ai
+cmake -S . -B cmake-build-release -DCMAKE_BUILD_TYPE=Release
+cmake --build cmake-build-release
+./cmake-build-release/gomoku_gui   # 桌面图形界面
+./cmake-build-release/gomoku_ai    # 命令行终端版本
 ```
 
 若终端已安装 CTest，可运行自动测试：

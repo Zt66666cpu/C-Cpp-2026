@@ -54,6 +54,35 @@ if(MINGW)
     target_link_options(gomoku_engine PRIVATE -static-libgcc -static)
 endif()
 
+option(BUILD_GUI "Build native raylib GUI executable gomoku_gui" ON)
+
+if(BUILD_GUI)
+    include(FetchContent)
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(CUSTOMIZE_BUILD OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        raylib
+        URL https://github.com/raysan5/raylib/archive/refs/tags/5.5.tar.gz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(raylib)
+
+    add_executable(gomoku_gui
+        src/gui_main.c
+        ${GOMOKU_CORE_SOURCES}
+    )
+    target_include_directories(gomoku_gui PRIVATE include)
+    target_link_libraries(gomoku_gui PRIVATE raylib)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(gomoku_gui PRIVATE m pthread)
+    endif()
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(gomoku_gui PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+
 include(CTest)
 
 if(BUILD_TESTING)

@@ -1,5 +1,6 @@
 #include "board.h"
 #include "console_ui.h"
+#include "nn_model.h"
 #include "rules.h"
 #include "search.h"
 
@@ -14,6 +15,7 @@ typedef struct {
     int max_depth;
     const char *nnue_path;
     const char *cnn_path;
+    bool no_nn;
     bool show_help;
 } CliOptions;
 
@@ -22,9 +24,10 @@ static void print_usage(const char *prog) {
     printf("  --ai-vs-ai       Run automated AI vs AI matches without menu\n");
     printf("  --games N        Number of games for --ai-vs-ai (default: 1)\n");
     printf("  --time SEC       Search time limit per move in seconds (default: 5.0)\n");
-    printf("  --depth D        Max search depth (default: 4)\n");
-    printf("  --nnue PATH      Path to NNUE-Lite model binary (optional)\n");
-    printf("  --cnn PATH       Path to Policy-Value CNN model binary (optional)\n");
+    printf("  --depth D        Max search depth (default: 5)\n");
+    printf("  --nnue PATH      Path to NNUE-Lite model binary (default: models/nnue.bin)\n");
+    printf("  --cnn PATH       Path to Policy-Value CNN binary (default: models/cnn.bin)\n");
+    printf("  --no-nn          Disable neural network models and use linear heuristic\n");
     printf("  --help           Show this help\n");
 }
 
@@ -32,9 +35,10 @@ static bool parse_cli(int argc, char **argv, CliOptions *opts) {
     opts->ai_vs_ai = false;
     opts->games = 1;
     opts->time_limit = 5.0;
-    opts->max_depth = 4;
+    opts->max_depth = 5;
     opts->nnue_path = "models/nnue.bin";
     opts->cnn_path = "models/cnn.bin";
+    opts->no_nn = false;
     opts->show_help = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -50,6 +54,8 @@ static bool parse_cli(int argc, char **argv, CliOptions *opts) {
             opts->nnue_path = argv[++i];
         } else if (strcmp(argv[i], "--cnn") == 0 && i + 1 < argc) {
             opts->cnn_path = argv[++i];
+        } else if (strcmp(argv[i], "--no-nn") == 0) {
+            opts->no_nn = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             opts->show_help = true;
             return true;
@@ -66,21 +72,17 @@ static bool parse_cli(int argc, char **argv, CliOptions *opts) {
 }
 
 static bool is_ai_turn(GameMode mode, Cell player) {
-    if (mode == GAME_MODE_AI_VS_AI) {
-        return true;
-    }
-    if (mode == GAME_MODE_HUMAN_BLACK) {
-        return player == CELL_WHITE;
-    }
-    if (mode == GAME_MODE_HUMAN_WHITE) {
-        return player == CELL_BLACK;
-    }
+    if (mode == GAME_MODE_AI_VS_AI) return true;
+    if (mode == GAME_MODE_HUMAN_BLACK) return player == CELL_WHITE;
+    if (mode == GAME_MODE_HUMAN_WHITE) return player == CELL_BLACK;
     return false;
 }
 
 static int run_single_game(
     GameMode mode,
     const SearchConfig *cfg,
+    const NnueModel *nnue,
+    const CnnModel *cnn,
     bool quiet_board
 ) {
     Board board;
@@ -100,7 +102,7 @@ static int run_single_game(
 
         if (is_ai_turn(mode, current_player)) {
             SearchResult res = search_find_best_move(
-                &board, current_player, last_move, cfg, NULL, NULL
+                &board, current_player, last_move, cfg, nnue, cnn
             );
             if (!res.valid) {
                 fprintf(stderr, "AI could not find a legal move.\n");
@@ -169,46 +171,69 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    (void)opts.nnue_path;
-    (void)opts.cnn_path;
+    NnueModel *nnue = NULL;
+    CnnModel *cnn = NULL;
+    if (!opts.no_nn) {
+        nnue = nnue_load(opts.nnue_path);
+        cnn = cnn_load(opts.cnn_path);
+        printf(
+            "Engine models: NNUE=%s, CNN=%s\n",
+            nnue ? opts.nnue_path : "none (linear fallback)",
+            cnn ? opts.cnn_path : "none (heuristic ordering)"
+        );
+    } else {
+        printf("Engine models: disabled (--no-nn, linear heuristic mode)\n");
+    }
 
     SearchConfig cfg = search_default_config();
     cfg.time_limit_sec = opts.time_limit;
     cfg.max_depth = opts.max_depth;
+    cfg.use_nnue = (nnue != NULL);
+    cfg.use_cnn = (cnn != NULL);
 
+    int rc = 0;
     if (opts.ai_vs_ai) {
         int black_wins = 0;
         int white_wins = 0;
         int draws = 0;
         for (int g = 0; g < opts.games; ++g) {
             printf("=== AI vs AI Game %d/%d ===\n", g + 1, opts.games);
-            int res = run_single_game(GAME_MODE_AI_VS_AI, &cfg, opts.games > 1);
+            int res = run_single_game(
+                GAME_MODE_AI_VS_AI, &cfg, nnue, cnn, opts.games > 1
+            );
             if (res < 0) {
-                return 1;
+                rc = 1;
+                break;
             }
             if (res == 1) ++black_wins;
             else if (res == 2) ++white_wins;
             else ++draws;
         }
-        printf(
-            "Summary (%d games): Black=%d, White=%d, Draw=%d\n",
-            opts.games, black_wins, white_wins, draws
-        );
-        return 0;
+        if (rc == 0) {
+            printf(
+                "Summary (%d games): Black=%d, White=%d, Draw=%d\n",
+                opts.games, black_wins, white_wins, draws
+            );
+        }
+    } else {
+        GameMode mode = GAME_MODE_HUMAN_BLACK;
+        for (;;) {
+            ui_prompt_mode();
+            if (ui_read_mode(&mode)) {
+                break;
+            }
+            if (feof(stdin)) {
+                nnue_free(nnue);
+                cnn_free(cnn);
+                return 0;
+            }
+            printf("Invalid selection. Please enter 1, 2, 3, or 4.\n");
+        }
+        int res = run_single_game(mode, &cfg, nnue, cnn, false);
+        rc = res < 0 ? 1 : 0;
     }
 
-    GameMode mode = GAME_MODE_HUMAN_BLACK;
-    for (;;) {
-        ui_prompt_mode();
-        if (ui_read_mode(&mode)) {
-            break;
-        }
-        if (feof(stdin)) {
-            return 0;
-        }
-        printf("Invalid selection. Please enter 1, 2, 3, or 4.\n");
-    }
-
-    int rc = run_single_game(mode, &cfg, false);
-    return rc < 0 ? 1 : 0;
+    nnue_free(nnue);
+    cnn_free(cnn);
+    return rc;
 }

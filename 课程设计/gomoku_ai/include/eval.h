@@ -21,8 +21,15 @@ void eval_extract_features(
 /* 使用可解释的线性权重计算静态局面分，范围 [-EVAL_MAX_STATIC_SCORE, EVAL_MAX_STATIC_SCORE] */
 int eval_linear_score(const EvalFeatures *features);
 
-/* 对当前局面估值（正值表示对 side_to_move 有利） */
+typedef struct NnueModel NnueModel;
+
+/* 对当前局面估值（若提供 nnue 则使用神经网络叶子估值，否则使用线性参数估值） */
 int eval_position(const Board *board, Cell side_to_move);
+int eval_position_with_nnue(
+    const Board *board,
+    Cell side_to_move,
+    const NnueModel *nnue
+);
 
 /* 单点局部启发式打分（用于着法排序，不修改 board） */
 int eval_move_heuristic(const Board *board, int row, int col, Cell player);

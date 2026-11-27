@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-已完成 **M3/M4（迭代加深、64 位 Zobrist 置换表、PVS/Killer/History 着法排序与 VCF 连续冲四杀棋搜索）**，并通过 Debug（ASan+UBSan）与 Release（`-O3`）全量 CTest 及 10 局自动对弈验证。接下来进入 **M5-A（纯 C11 双网推理引擎 + 共享库 + PyTorch MPS/CUDA 训练管线）**。
+已完成 **M5-A（纯 C11 双神经网络推理引擎、共享库自博弈接口与 PyTorch MPS/CUDA 训练管线）**，并完成 PyTorch 与纯 C11 前向推理数值一致性校验（误差 `< 1e-7`）。接下来进入 **M5-B（启动首批多轮自博弈训练、擂台赛评测与持续优化）**。
 
 ## 已完成
 
@@ -43,8 +43,7 @@
 
 ## 下一次会话起点
 
-1. **M5-A**：实现纯 C11 双网推理（`nn_model.c`，`GNN1` NNUE-Lite + `GCV1` Policy-Value CNN）、C 共享库（`selfplay_api.c`）与 PyTorch（MPS/CUDA）多轮自博弈训练管线。
-2. **M5-B**：启动首批多轮训练与擂台评测，并进入持续优化循环。
+1. **M5-B**：运行多轮自博弈与双网（NNUE-Lite + Policy-Value CNN）持续训练、纯 C 擂台赛门控晋级，并编写 `docs/ALGORITHM_GUIDE.md` 答辩文档。
 
 ## 已知风险
 
@@ -58,6 +57,14 @@
 - 当前双三和双四采用基础威胁枚举，尚未覆盖完整连珠的全部递归例外。
 
 ## 变更日志
+
+### 2026-11-27（M5-A）
+
+- 新增纯 C11 零外部依赖推理模块 `nn_model`：支持 `GNN1`（NNUE-Lite 32->64->32->1 MLP）与 `GCV1`（Conv3x3+BN 融合残差网络，策略/价值双头）。
+- 将 NNUE-Lite 接入 `eval_position_with_nnue`，将 Policy-Value CNN 策略先验与全局价值融合接入 `search_find_best_move`。
+- 新增 C 共享库 `gomoku_engine`（`selfplay_api.h/.c`），提供多进程安全自博弈采样、成对换先擂台赛与数值一致性调试接口。
+- 使用 `uv` 搭建 Python 3.12 + PyTorch 2.15 (MPS) + NumPy 训练环境，完成 `training/` 训练与 8 折二面体对称增广管线。
+- 实测 PyTorch 与纯 C11 前向推理最大绝对误差：`nnue=8.94e-08`，`cnn_val=7.45e-09`，`cnn_pol=7.08e-08`（远小于 `1e-4`）。
 
 ### 2026-11-27（M3/M4）
 

@@ -10,6 +10,7 @@ set(GOMOKU_CORE_SOURCES
     src/board.c
     src/rules.c
     src/eval.c
+    src/nn_model.c
     src/search.c
 )
 
@@ -27,6 +28,21 @@ endif()
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(gomoku_ai PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_library(gomoku_engine SHARED
+    src/selfplay_api.c
+    ${GOMOKU_CORE_SOURCES}
+)
+
+target_include_directories(gomoku_engine PRIVATE include)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(gomoku_engine PRIVATE m)
+endif()
+
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(gomoku_engine PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 include(CTest)

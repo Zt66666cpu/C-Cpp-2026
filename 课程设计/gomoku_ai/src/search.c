@@ -1,6 +1,7 @@
 #include "search.h"
 
 #include "eval.h"
+#include "nn_model.h"
 #include "rules.h"
 
 #include <math.h>
@@ -41,6 +42,7 @@ typedef struct {
     Cell root_player;
     uint64_t zobrist;
     TTEntry *tt;
+    const NnueModel *nnue;
     Move killers[MAX_PLY][2];
     int history[2][BOARD_CELLS];
 } SearchState;
@@ -176,15 +178,9 @@ int search_generate_candidates(
 
     for (int r = 0; r < BOARD_SIZE; ++r) {
         for (int c = 0; c < BOARD_SIZE; ++c) {
-            if (!board_is_empty(board, r, c)) {
-                continue;
-            }
-            if (!has_neighbor_within(board, r, c, radius)) {
-                continue;
-            }
-            if (!rules_is_legal_move(board, r, c, player)) {
-                continue;
-            }
+            if (!board_is_empty(board, r, c)) continue;
+            if (!has_neighbor_within(board, r, c, radius)) continue;
+            if (!rules_is_legal_move(board, r, c, player)) continue;
             scored[count].move.row = r;
             scored[count].move.col = c;
             scored[count].score = eval_move_heuristic(board, r, c, player);
@@ -233,9 +229,7 @@ static int collect_four_winning_points(
             if (s == 0) continue;
             int nr = row + s * DR[d];
             int nc = col + s * DC[d];
-            if (!board_is_empty(board, nr, nc)) {
-                continue;
-            }
+            if (!board_is_empty(board, nr, nc)) continue;
             if (rules_is_winning_move(board, nr, nc, attacker)) {
                 bool dup = false;
                 for (int k = 0; k < count; ++k) {
@@ -270,7 +264,6 @@ static bool vcf_dfs(
         return false;
     }
 
-    /* 1. 立即成五必胜 */
     for (int r = 0; r < BOARD_SIZE; ++r) {
         for (int c = 0; c < BOARD_SIZE; ++c) {
             if (rules_is_winning_move(board, r, c, attacker)) {
@@ -292,9 +285,7 @@ static bool vcf_dfs(
     Cell defender = board_opponent(attacker);
 
     for (int i = 0; i < cand_count; ++i) {
-        if (*time_up) {
-            return false;
-        }
+        if (*time_up) return false;
         Move m = cands[i];
         board_place(board, m.row, m.col, attacker);
 
@@ -304,11 +295,8 @@ static bool vcf_dfs(
         );
 
         if (wp_count >= 2) {
-            /* 形成活四或双冲四，无法单手解 */
             board_undo(board, m.row, m.col);
-            if (win_move) {
-                *win_move = m;
-            }
+            if (win_move) *win_move = m;
             return true;
         }
 
@@ -317,11 +305,8 @@ static bool vcf_dfs(
             bool def_wins = rules_is_winning_move(board, def.row, def.col, defender);
             if (!def_wins) {
                 if (!rules_is_legal_move(board, def.row, def.col, defender)) {
-                    /* 防守方被迫下禁手点（黑方），进攻方直接胜 */
                     board_undo(board, m.row, m.col);
-                    if (win_move) {
-                        *win_move = m;
-                    }
+                    if (win_move) *win_move = m;
                     return true;
                 }
 
@@ -335,9 +320,7 @@ static bool vcf_dfs(
 
                 if (sub_win) {
                     board_undo(board, m.row, m.col);
-                    if (win_move) {
-                        *win_move = m;
-                    }
+                    if (win_move) *win_move = m;
                     return true;
                 }
             }
@@ -377,10 +360,10 @@ bool search_find_vcf(
 static bool check_tactical_guardrail(
     Board *board,
     Cell player,
+    const NnueModel *nnue,
     Move *out_move,
     int *out_score
 ) {
-    /* 1. 己方一步成五 */
     for (int r = 0; r < BOARD_SIZE; ++r) {
         for (int c = 0; c < BOARD_SIZE; ++c) {
             if (rules_is_winning_move(board, r, c, player)) {
@@ -392,7 +375,6 @@ static bool check_tactical_guardrail(
         }
     }
 
-    /* 2. 对方存在唯一成五点，必须立即封堵 */
     Cell opp = board_opponent(player);
     Move defense_moves[BOARD_CELLS];
     int defense_count = 0;
@@ -409,7 +391,7 @@ static bool check_tactical_guardrail(
 
     if (defense_count == 1) {
         *out_move = defense_moves[0];
-        *out_score = eval_position(board, player);
+        *out_score = eval_position_with_nnue(board, player, nnue);
         return true;
     }
 
@@ -469,7 +451,6 @@ static int generate_ordered_moves(
     qsort(scored, (size_t)count, sizeof(ScoredMove), compare_scored_moves_desc);
 
     int out_count = count < max_moves ? count : max_moves;
-    /* 保留超过裁剪上限的强威胁点（至少活三/冲四等级） */
     for (int i = out_count; i < count && out_count < max_moves + 4; ++i) {
         if (scored[i].score >= 2400) {
             out_count = i + 1;
@@ -516,22 +497,15 @@ static int negamax(
         }
         if (tte->depth >= depth) {
             int tt_score = score_from_tt(tte->score, ply);
-            if (tte->flag == TT_EXACT) {
-                return tt_score;
-            }
-            if (tte->flag == TT_LOWER && tt_score > alpha) {
-                alpha = tt_score;
-            } else if (tte->flag == TT_UPPER && tt_score < beta) {
-                beta = tt_score;
-            }
-            if (alpha >= beta) {
-                return tt_score;
-            }
+            if (tte->flag == TT_EXACT) return tt_score;
+            if (tte->flag == TT_LOWER && tt_score > alpha) alpha = tt_score;
+            else if (tte->flag == TT_UPPER && tt_score < beta) beta = tt_score;
+            if (alpha >= beta) return tt_score;
         }
     }
 
     if (depth <= 0) {
-        return eval_position(board, player);
+        return eval_position_with_nnue(board, player, state->nnue);
     }
 
     Move candidates[24];
@@ -577,9 +551,7 @@ static int negamax(
         state->zobrist ^= g_zobrist_stone[m.row][m.col][player] ^ g_zobrist_side;
         board_undo(board, m.row, m.col);
 
-        if (state->time_up) {
-            return 0;
-        }
+        if (state->time_up) return 0;
 
         if (score > best) {
             best = score;
@@ -599,11 +571,9 @@ static int negamax(
     }
 
     TTFlag flag = TT_EXACT;
-    if (best <= orig_alpha) {
-        flag = TT_UPPER;
-    } else if (best >= beta) {
-        flag = TT_LOWER;
-    }
+    if (best <= orig_alpha) flag = TT_UPPER;
+    else if (best >= beta) flag = TT_LOWER;
+
     tte->key = state->zobrist;
     tte->depth = (int16_t)depth;
     tte->score = (int32_t)score_to_tt(best, ply);
@@ -621,12 +591,9 @@ static void fill_policy_from_scores(
     float *out_policy
 ) {
     memset(out_policy, 0, sizeof(float) * BOARD_CELLS);
-    if (count <= 0) {
-        return;
-    }
-    if (temperature <= 1e-4f) {
-        temperature = 0.25f;
-    }
+    if (count <= 0) return;
+
+    float t = temperature > 1e-4f ? temperature : 0.30f;
     int max_s = scores[0];
     for (int i = 1; i < count; ++i) {
         if (scores[i] > max_s) max_s = scores[i];
@@ -635,7 +602,7 @@ static void fill_policy_from_scores(
     double sum = 0.0;
     double probs[32];
     for (int i = 0; i < count; ++i) {
-        double scaled = ((double)(scores[i] - max_s)) / (1500.0 * (double)temperature);
+        double scaled = ((double)(scores[i] - max_s)) / (2000.0 * (double)t);
         if (scaled < -40.0) scaled = -40.0;
         probs[i] = exp(scaled);
         sum += probs[i];
@@ -657,13 +624,11 @@ SearchResult search_find_best_move(
     const NnueModel *nnue,
     const CnnModel *cnn
 ) {
-    (void)last_move;
-    (void)nnue;
-    (void)cnn;
-
     init_zobrist();
 
     SearchConfig cfg = config ? *config : search_default_config();
+    const NnueModel *active_nnue = cfg.use_nnue ? nnue : NULL;
+    const CnnModel *active_cnn = cfg.use_cnn ? cnn : NULL;
     double start_time = now_seconds();
     double budget = cfg.time_limit_sec > 0.05 ? cfg.time_limit_sec : 0.05;
 
@@ -671,12 +636,12 @@ SearchResult search_find_best_move(
     memset(&result, 0, sizeof(result));
     result.best_move.row = -1;
     result.best_move.col = -1;
+    result.stats.used_nnue = (active_nnue != NULL);
 
     if (player != CELL_BLACK && player != CELL_WHITE) {
         return result;
     }
 
-    /* 空盘直接落天元 */
     if (board_stone_count(board) == 0) {
         result.best_move.row = BOARD_SIZE / 2;
         result.best_move.col = BOARD_SIZE / 2;
@@ -701,7 +666,7 @@ SearchResult search_find_best_move(
     /* Layer 1 战术护栏 */
     Move guard_move;
     int guard_score = 0;
-    if (check_tactical_guardrail(board, player, &guard_move, &guard_score)) {
+    if (check_tactical_guardrail(board, player, active_nnue, &guard_move, &guard_score)) {
         result.best_move = guard_move;
         result.root_policy[guard_move.row * BOARD_SIZE + guard_move.col] = 1.0f;
         result.stats.used_guardrail = true;
@@ -734,6 +699,64 @@ SearchResult search_find_best_move(
         result.stats.vcf_nodes = vcf_nodes;
     }
 
+    /* Layer 3A：CNN 根节点策略先验排序（扩展全局直觉与高概率候选点） */
+    float cnn_prior[BOARD_CELLS];
+    memset(cnn_prior, 0, sizeof(cnn_prior));
+    if (active_cnn) {
+        float cnn_in[BOARD_CELLS * CNN_INPUT_CHANNELS];
+        float logits[BOARD_CELLS];
+        bool legal_mask[BOARD_CELLS];
+        nn_build_cnn_input(board, player, last_move, cnn_in);
+        cnn_forward(active_cnn, cnn_in, logits);
+        for (int r = 0; r < BOARD_SIZE; ++r) {
+            for (int c = 0; c < BOARD_SIZE; ++c) {
+                legal_mask[r * BOARD_SIZE + c] = rules_is_legal_move(board, r, c, player);
+            }
+        }
+        cnn_masked_softmax(logits, legal_mask, cnn_prior);
+        result.stats.used_cnn = true;
+
+        /* 把 CNN 认为概率极高的全盘合法点也补充进根节点候选（最多补 4 个） */
+        for (int add = 0; add < 4 && root_count < 26; ++add) {
+            int best_idx = -1;
+            float best_p = 0.02f;
+            for (int idx = 0; idx < BOARD_CELLS; ++idx) {
+                if (!legal_mask[idx] || cnn_prior[idx] <= best_p) continue;
+                int rr = idx / BOARD_SIZE;
+                int cc = idx % BOARD_SIZE;
+                bool exists = false;
+                for (int k = 0; k < root_count; ++k) {
+                    if (root_moves[k].row == rr && root_moves[k].col == cc) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    best_p = cnn_prior[idx];
+                    best_idx = idx;
+                }
+            }
+            if (best_idx < 0) break;
+            root_moves[root_count].row = best_idx / BOARD_SIZE;
+            root_moves[root_count].col = best_idx % BOARD_SIZE;
+            ++root_count;
+        }
+
+        /* 按局部战术启发 + CNN 先验排序根节点着法 */
+        ScoredMove root_scored[28];
+        for (int i = 0; i < root_count; ++i) {
+            Move m = root_moves[i];
+            int h = eval_move_heuristic(board, m.row, m.col, player);
+            float p = cnn_prior[m.row * BOARD_SIZE + m.col];
+            root_scored[i].move = m;
+            root_scored[i].score = h + (int)(p * 6000.0f);
+        }
+        qsort(root_scored, (size_t)root_count, sizeof(ScoredMove), compare_scored_moves_desc);
+        for (int i = 0; i < root_count; ++i) {
+            root_moves[i] = root_scored[i].move;
+        }
+    }
+
     /* Layer 2B：迭代加深 PVS + 置换表 */
     TTEntry *tt = calloc(TT_SIZE, sizeof(TTEntry));
     if (!tt) {
@@ -748,6 +771,7 @@ SearchResult search_find_best_move(
     state.root_player = player;
     state.zobrist = search_compute_zobrist(board, player);
     state.tt = tt;
+    state.nnue = active_nnue;
 
     int target_depth = cfg.max_depth < 1 ? 1 : cfg.max_depth;
     Move best_move = root_moves[0];
@@ -766,7 +790,6 @@ SearchResult search_find_best_move(
             break;
         }
 
-        /* 将上轮最佳着法移至根节点首位 */
         for (int i = 1; i < root_count; ++i) {
             if (same_move(root_moves[i], best_move)) {
                 Move tmp_m = root_moves[0];
@@ -835,6 +858,60 @@ SearchResult search_find_best_move(
 
     free(tt);
 
+    /* Layer 3B：对非杀棋局面，使用 CNN Value 头对顶尖候选着法进行全局价值融合 */
+    if (active_cnn && cfg.cnn_value_weight > 0.01f
+        && best_score < MATE_BOUND && best_score > -MATE_BOUND
+        && (now_seconds() - start_time) < budget * 0.90) {
+        int order[28];
+        for (int i = 0; i < root_count; ++i) {
+            order[i] = i;
+        }
+        for (int i = 0; i < root_count; ++i) {
+            for (int j = i + 1; j < root_count; ++j) {
+                if (root_scores[order[j]] > root_scores[order[i]]) {
+                    int tmp = order[i];
+                    order[i] = order[j];
+                    order[j] = tmp;
+                }
+            }
+        }
+
+        int eval_k = root_count < 6 ? root_count : 6;
+        float w_cnn = cfg.cnn_value_weight;
+        if (w_cnn > 0.8f) w_cnn = 0.8f;
+
+        float best_blended = -1e9f;
+        for (int k = 0; k < eval_k; ++k) {
+            int idx = order[k];
+            if (root_scores[idx] <= -MATE_BOUND || root_scores[idx] >= MATE_BOUND) {
+                continue;
+            }
+            /* 不挑选明显逊于最优分支超过 15000 分的坏棋 */
+            if (best_score - root_scores[idx] > 15000) {
+                continue;
+            }
+
+            Move m = root_moves[idx];
+            board_place(board, m.row, m.col, player);
+            float cnn_in[BOARD_CELLS * CNN_INPUT_CHANNELS];
+            nn_build_cnn_input(board, opp, m, cnn_in);
+            float opp_val = cnn_forward(active_cnn, cnn_in, NULL);
+            board_undo(board, m.row, m.col);
+
+            float my_cnn_val = -opp_val;
+            float ab_norm = tanhf((float)root_scores[idx] / 25000.0f);
+            float blended = (1.0f - w_cnn) * ab_norm + w_cnn * my_cnn_val;
+
+            /* 同步修正 root_scores 以便生成融合后的策略分布 */
+            root_scores[idx] = (int)(blended * 25000.0f);
+            if (blended > best_blended) {
+                best_blended = blended;
+                best_move = m;
+                best_score = root_scores[idx];
+            }
+        }
+    }
+
     result.best_move = best_move;
     result.stats.completed_depth = completed_depth;
     result.stats.nodes = state.nodes + result.stats.vcf_nodes;
@@ -845,7 +922,6 @@ SearchResult search_find_best_move(
         root_moves, root_scores, root_count, cfg.temperature, result.root_policy
     );
 
-    /* 若需要温度探索采样（自博弈多样性） */
     if (cfg.temperature > 0.01f && best_score < MATE_BOUND && best_score > -MATE_BOUND) {
         uint64_t rng = cfg.seed ? cfg.seed : 1ULL;
         uint64_t rval = splitmix64(&rng);

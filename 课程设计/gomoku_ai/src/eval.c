@@ -1,4 +1,5 @@
 #include "eval.h"
+#include "nn_model.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -457,7 +458,11 @@ int eval_linear_score(const EvalFeatures *features) {
     return clamp_int((int)score, -EVAL_MAX_STATIC_SCORE, EVAL_MAX_STATIC_SCORE);
 }
 
-int eval_position(const Board *board, Cell side_to_move) {
+int eval_position_with_nnue(
+    const Board *board,
+    Cell side_to_move,
+    const NnueModel *nnue
+) {
     EvalFeatures features;
     eval_extract_features(board, side_to_move, &features);
 
@@ -468,7 +473,20 @@ int eval_position(const Board *board, Cell side_to_move) {
         return -(EVAL_MATE_SCORE - 10);
     }
 
+    if (nnue) {
+        float val = nnue_forward(nnue, &features);
+        int nn_score = (int)(val * (float)EVAL_MAX_STATIC_SCORE);
+        /* 混入 15% 可解释线性锚定分，防止早期训练欠拟合导致基本棋型错判 */
+        int lin_score = eval_linear_score(&features);
+        int blended = (nn_score * 85 + lin_score * 15) / 100;
+        return clamp_int(blended, -EVAL_MAX_STATIC_SCORE, EVAL_MAX_STATIC_SCORE);
+    }
+
     return eval_linear_score(&features);
+}
+
+int eval_position(const Board *board, Cell side_to_move) {
+    return eval_position_with_nnue(board, side_to_move, NULL);
 }
 
 static int pattern_score_only(const PatternCounts *c) {

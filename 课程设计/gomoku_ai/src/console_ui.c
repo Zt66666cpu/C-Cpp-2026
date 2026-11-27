@@ -108,7 +108,7 @@ InputResult ui_read_move(int *row, int *col) {
 
 void ui_print_ai_move(Cell player, Move move, const SearchStats *stats) {
     printf(
-        "AI %s plays (%d, %d) | depth=%d nodes=%llu vcf=%llu time=%.3fs score=%d%s%s\n",
+        "AI %s plays (%d, %d) | depth=%d nodes=%llu vcf=%llu time=%.3fs score=%d%s%s%s%s\n",
         player == CELL_BLACK ? "Black (X)" : "White (O)",
         move.row + 1,
         move.col + 1,
@@ -118,7 +118,9 @@ void ui_print_ai_move(Cell player, Move move, const SearchStats *stats) {
         stats->elapsed_sec,
         stats->score,
         stats->used_vcf ? " [VCF]" : "",
-        stats->used_guardrail ? " [GUARD]" : ""
+        stats->used_guardrail ? " [GUARD]" : "",
+        stats->used_nnue ? " [NNUE]" : "",
+        stats->used_cnn ? " [CNN]" : ""
     );
 }
 

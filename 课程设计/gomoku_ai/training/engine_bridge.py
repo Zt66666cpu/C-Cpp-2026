@@ -296,6 +296,122 @@ def run_arena_match(
     return stats
 
 
+def _worker_arena_match(args: Tuple) -> MatchStats:
+    (
+        lib_path_str,
+        a_nnue_str,
+        a_cnn_str,
+        a_depth,
+        a_vcf_depth,
+        a_time,
+        a_cnn_weight,
+        b_nnue_str,
+        b_cnn_str,
+        b_depth,
+        b_vcf_depth,
+        b_time,
+        b_cnn_weight,
+        num_games,
+        seed,
+    ) = args
+
+    lib = _bind_lib(Path(lib_path_str))
+    ha = lib.gomoku_load_models(
+        a_nnue_str.encode("utf-8") if a_nnue_str else b"",
+        a_cnn_str.encode("utf-8") if a_cnn_str else b"",
+    )
+    hb = lib.gomoku_load_models(
+        b_nnue_str.encode("utf-8") if b_nnue_str else b"",
+        b_cnn_str.encode("utf-8") if b_cnn_str else b"",
+    )
+    stats = MatchStats()
+    try:
+        rc = lib.gomoku_run_match(
+            ha, a_depth, a_vcf_depth, a_time, a_cnn_weight,
+            hb, b_depth, b_vcf_depth, b_time, b_cnn_weight,
+            num_games, seed, ctypes.byref(stats),
+        )
+        if rc != 0:
+            raise RuntimeError(f"gomoku_run_match failed with rc={rc}")
+    finally:
+        lib.gomoku_free_models(ha)
+        lib.gomoku_free_models(hb)
+    return stats
+
+
+def run_arena_match_parallel(
+    lib_path: Path,
+    a_nnue: Optional[Path],
+    a_cnn: Optional[Path],
+    a_depth: int,
+    a_vcf_depth: int,
+    a_time: float,
+    a_cnn_weight: float,
+    b_nnue: Optional[Path],
+    b_cnn: Optional[Path],
+    b_depth: int,
+    b_vcf_depth: int,
+    b_time: float,
+    b_cnn_weight: float,
+    num_games: int,
+    seed: int,
+    workers: int = 8,
+) -> MatchStats:
+    """按成对开局切分给多进程并行评测，汇总完全公平的对局统计。"""
+    if workers <= 1 or num_games < 4:
+        return run_arena_match(
+            lib_path,
+            a_nnue, a_cnn, a_depth, a_vcf_depth, a_time, a_cnn_weight,
+            b_nnue, b_cnn, b_depth, b_vcf_depth, b_time, b_cnn_weight,
+            num_games, seed,
+        )
+
+    total_pairs = max(1, num_games // 2)
+    eff_workers = max(1, min(workers, total_pairs))
+    pair_counts = [total_pairs // eff_workers] * eff_workers
+    for i in range(total_pairs % eff_workers):
+        pair_counts[i] += 1
+
+    a_nnue_str = str(a_nnue) if (a_nnue and a_nnue.exists()) else ""
+    a_cnn_str = str(a_cnn) if (a_cnn and a_cnn.exists()) else ""
+    b_nnue_str = str(b_nnue) if (b_nnue and b_nnue.exists()) else ""
+    b_cnn_str = str(b_cnn) if (b_cnn and b_cnn.exists()) else ""
+
+    tasks = []
+    pair_offset = 0
+    for pc in pair_counts:
+        tasks.append((
+            str(lib_path),
+            a_nnue_str, a_cnn_str, a_depth, a_vcf_depth, a_time, a_cnn_weight,
+            b_nnue_str, b_cnn_str, b_depth, b_vcf_depth, b_time, b_cnn_weight,
+            pc * 2,
+            seed + pair_offset,
+        ))
+        pair_offset += pc
+
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(processes=eff_workers) as pool:
+        results = pool.map(_worker_arena_match, tasks)
+
+    agg = MatchStats()
+    a_time_sum = 0.0
+    b_time_sum = 0.0
+    total_g = 0
+    for r in results:
+        g = r.a_wins + r.b_wins + r.draws
+        agg.a_wins += r.a_wins
+        agg.b_wins += r.b_wins
+        agg.draws += r.draws
+        agg.illegal_moves += r.illegal_moves
+        a_time_sum += r.a_avg_time_sec * g
+        b_time_sum += r.b_avg_time_sec * g
+        total_g += g
+
+    agg.a_avg_time_sec = a_time_sum / max(1, total_g)
+    agg.b_avg_time_sec = b_time_sum / max(1, total_g)
+    return agg
+
+
 def verify_c_parity(lib_path: Path, nnue_model, cnn_model) -> Dict[str, float]:
     """验证 PyTorch 模型输出与纯 C11 前向推理误差 < 1e-4。"""
     import torch

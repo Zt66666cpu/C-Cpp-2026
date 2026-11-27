@@ -643,7 +643,7 @@ int gomoku_generate_game_pnnue(
         cfg.time_limit_sec = time_limit_sec > 0.05 ? time_limit_sec : 0.5;
         cfg.use_nnue = (pnnue != NULL);
         cfg.use_cnn = false;
-        cfg.temperature = (steps < 16) ? explore_temp : (explore_temp * 0.25f);
+        cfg.temperature = (steps < 8) ? explore_temp : 0.0f;
         cfg.seed = next_rng(&rng);
 
         SearchResult res = pnnue

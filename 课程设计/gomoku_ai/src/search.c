@@ -1092,7 +1092,8 @@ static int generate_pnnue_moves(
 
             Move m = {r, c};
             float logit = pnnue_eval_policy_cell(state->acc, state->pnnue, r, c, player);
-            int s = (int)(logit * 1000.0f);
+            int h = eval_move_heuristic(board, r, c, player);
+            int s = (int)(logit * 1200.0f) + (h / 2);
 
             if (same_move(m, tt_move)) {
                 s += 5000000;
@@ -1116,8 +1117,8 @@ static int generate_pnnue_moves(
                     scored[count].move.row = r;
                     scored[count].move.col = c;
                     scored[count].score = (int)(
-                        pnnue_eval_policy_cell(state->acc, state->pnnue, r, c, player) * 1000.0f
-                    );
+                        pnnue_eval_policy_cell(state->acc, state->pnnue, r, c, player) * 1200.0f
+                    ) + (eval_move_heuristic(board, r, c, player) / 2);
                     ++count;
                 }
             }
@@ -1176,7 +1177,7 @@ static int negamax_pnnue(
     }
 
     Move candidates[24];
-    int limit = depth >= 3 ? 18 : 14;
+    int limit = depth >= 3 ? 20 : 16;
     int cand_count = generate_pnnue_moves(
         board, player, ply, tt_move, state, candidates, limit
     );
@@ -1212,8 +1213,9 @@ static int negamax_pnnue(
             score = -negamax_pnnue(board, opp, depth - 1, ply + 1, -beta, -alpha, state);
         } else {
             int reduction = 0;
-            if (depth >= 3 && i >= 4) {
-                reduction = (depth >= 5 && i >= 8) ? 2 : 1;
+            if (depth >= 4 && i >= 6
+                && eval_move_heuristic(board, m.row, m.col, player) < 4000) {
+                reduction = (depth >= 6 && i >= 10) ? 2 : 1;
             }
             int search_d = depth - 1 - reduction;
             if (search_d < 0) search_d = 0;
@@ -1392,9 +1394,11 @@ SearchResult search_find_best_move_pnnue(
     Move best_move = root_moves[0];
     int best_score = 0;
     int root_scores[28];
+    bool root_exact[28];
     for (int i = 0; i < root_count; ++i) {
         float lg = pnnue_eval_policy_cell(acc, pnnue, root_moves[i].row, root_moves[i].col, player);
         root_scores[i] = (int)(lg * 1000.0f);
+        root_exact[i] = false;
     }
 
     int completed_depth = 0;
@@ -1414,6 +1418,9 @@ SearchResult search_find_best_move_pnnue(
                 int tmp_s = root_scores[0];
                 root_scores[0] = root_scores[i];
                 root_scores[i] = tmp_s;
+                bool tmp_e = root_exact[0];
+                root_exact[0] = root_exact[i];
+                root_exact[i] = tmp_e;
                 break;
             }
         }
@@ -1421,6 +1428,7 @@ SearchResult search_find_best_move_pnnue(
         int iter_best_score = -EVAL_MATE_SCORE * 2;
         Move iter_best_move = root_moves[0];
         int iter_scores[28];
+        bool iter_exact[28];
         int alpha = -EVAL_MATE_SCORE * 2;
         int beta = EVAL_MATE_SCORE * 2;
 
@@ -1431,12 +1439,15 @@ SearchResult search_find_best_move_pnnue(
             state.zobrist ^= g_zobrist_stone[m.row][m.col][player] ^ g_zobrist_side;
 
             int score;
+            bool exact = false;
             if (i == 0) {
                 score = -negamax_pnnue(board, opp, depth - 1, 1, -beta, -alpha, &state);
+                exact = true;
             } else {
                 score = -negamax_pnnue(board, opp, depth - 1, 1, -alpha - 1, -alpha, &state);
                 if (!state.time_up && score > alpha && score < beta) {
                     score = -negamax_pnnue(board, opp, depth - 1, 1, -beta, -alpha, &state);
+                    exact = true;
                 }
             }
 
@@ -1449,6 +1460,7 @@ SearchResult search_find_best_move_pnnue(
             }
 
             iter_scores[i] = score;
+            iter_exact[i] = exact;
             if (score > iter_best_score) {
                 iter_best_score = score;
                 iter_best_move = m;
@@ -1467,10 +1479,72 @@ SearchResult search_find_best_move_pnnue(
         completed_depth = depth;
         for (int i = 0; i < root_count; ++i) {
             root_scores[i] = iter_scores[i];
+            root_exact[i] = iter_exact[i];
         }
 
         if (best_score >= MATE_BOUND) {
             break;
+        }
+    }
+
+    /* PVS 根节点 fail-low 精确窗口复核，防止温度采样与策略目标混入盲区坏棋 */
+    if (completed_depth >= 1
+        && cfg.temperature > 0.01f
+        && best_score < MATE_BOUND && best_score > -MATE_BOUND
+        && (now_seconds() - start_time) < budget * 0.88) {
+        int verify_budget = 6;
+        int verified_non_exact = 0;
+        int safe_floor = best_score - 15000;
+        int safe_ceil = best_score + 1;
+
+        for (int i = 0; i < root_count; ++i) {
+            if (root_exact[i]) {
+                continue;
+            }
+            if (verified_non_exact >= verify_budget
+                || (now_seconds() - start_time) >= budget * 0.90) {
+                if (root_scores[i] > best_score - 20000) {
+                    root_scores[i] = best_score - 20000;
+                }
+                continue;
+            }
+
+            Move m = root_moves[i];
+            state.time_up = false;
+            board_place(board, m.row, m.col, player);
+            pnnue_acc_update_cell(acc, pnnue, m.row, m.col, player);
+            state.zobrist ^= g_zobrist_stone[m.row][m.col][player] ^ g_zobrist_side;
+
+            int vscore = -negamax_pnnue(
+                board, opp, completed_depth - 1, 1, -safe_ceil, -safe_floor, &state
+            );
+
+            state.zobrist ^= g_zobrist_stone[m.row][m.col][player] ^ g_zobrist_side;
+            pnnue_acc_update_cell(acc, pnnue, m.row, m.col, CELL_EMPTY);
+            board_undo(board, m.row, m.col);
+            ++verified_non_exact;
+
+            if (state.time_up) {
+                root_scores[i] = best_score - 20000;
+                continue;
+            }
+
+            if (vscore <= safe_floor) {
+                root_scores[i] = best_score - 25000;
+            } else {
+                root_scores[i] = vscore;
+                root_exact[i] = true;
+                if (vscore > best_score) {
+                    best_score = vscore;
+                    best_move = m;
+                }
+            }
+        }
+    } else if (completed_depth >= 1) {
+        for (int i = 0; i < root_count; ++i) {
+            if (!root_exact[i] && root_scores[i] > best_score - 20000) {
+                root_scores[i] = best_score - 20000;
+            }
         }
     }
 

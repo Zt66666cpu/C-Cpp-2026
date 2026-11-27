@@ -313,7 +313,7 @@ def _build_payload(
         if cli.get("resume") and resumed_from is not None:
             max_rounds = resumed_from + int(cli["rounds"])
         elif cli.get("resume"):
-            max_rounds = completed_rounds + int(cli["rounds"])
+            max_rounds = max(int(cli["rounds"]), completed_rounds)
         else:
             max_rounds = max(int(cli["rounds"]), completed_rounds)
     else:
@@ -343,13 +343,17 @@ def _build_payload(
     if proc is not None and completed_rounds < max_rounds:
         next_round = (rows[-1]["round"] + 1) if rows else 1
         current_round = next_round
-        last_round_ts = metrics_mtime if rows else max(0.0, now - float(proc["elapsed_seconds"]))
         if v3:
+            champ_pt = v3_dir / "pnnue_champ.pt"
+            champ_ts = champ_pt.stat().st_mtime if champ_pt.exists() else 0.0
+            base_ts = metrics_mtime if rows else 0.0
+            last_round_ts = max(base_ts, champ_ts) or max(0.0, now - float(proc["elapsed_seconds"]))
             buf_path = v3_dir / "pnnue_buffer.npz"
             cand_paths = [v3_dir / "pnnue_cand.bin"]
             train_label = "CUDA 训练中"
             train_detail = f"第 {next_round} 轮 · Pattern-NNUE 单网训练（RTX 4070 CUDA）"
         else:
+            last_round_ts = metrics_mtime if rows else max(0.0, now - float(proc["elapsed_seconds"]))
             buf_path = data_dir / "replay_buffer.npz"
             cand_paths = [runs_dir / f"cand_cnn_r{next_round}.bin", runs_dir / f"cand_nnue_r{next_round}.bin"]
             train_label = "CUDA 训练中"

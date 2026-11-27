@@ -67,7 +67,7 @@ bool ui_read_mode(GameMode *mode) {
 
 void ui_prompt_move(Cell player) {
     printf(
-        "%s to move. Enter row and column (1-%d), or q to quit: ",
+        "%s to move. Enter row and column (1-%d), u to undo, or q to quit: ",
         player == CELL_BLACK ? "Black (X)" : "White (O)",
         BOARD_SIZE
     );
@@ -83,9 +83,13 @@ InputResult ui_read_move(int *row, int *col) {
     }
 
     char command[16];
-    if (sscanf(line, "%15s", command) == 1
-        && (strcmp(command, "q") == 0 || strcmp(command, "quit") == 0)) {
-        return INPUT_QUIT;
+    if (sscanf(line, "%15s", command) == 1) {
+        if (strcmp(command, "q") == 0 || strcmp(command, "quit") == 0) {
+            return INPUT_QUIT;
+        }
+        if (strcmp(command, "u") == 0 || strcmp(command, "undo") == 0) {
+            return INPUT_UNDO;
+        }
     }
 
     int user_row;

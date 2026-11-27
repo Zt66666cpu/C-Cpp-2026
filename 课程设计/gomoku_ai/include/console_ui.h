@@ -8,6 +8,7 @@
 typedef enum {
     INPUT_OK,
     INPUT_INVALID,
+    INPUT_UNDO,
     INPUT_QUIT,
     INPUT_EOF
 } InputResult;

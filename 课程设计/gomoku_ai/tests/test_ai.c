@@ -1,5 +1,6 @@
 #include "board.h"
 #include "eval.h"
+#include "nn_model.h"
 #include "rules.h"
 #include "search.h"
 
@@ -222,6 +223,84 @@ static void test_pvs_root_verification_avoids_blunder(void) {
     CHECK(safe_mass > 0.95f);
 }
 
+static void test_nn_missing_file_fallback(void) {
+    CHECK(nnue_load("nonexistent_nnue_12345.bin") == NULL);
+    CHECK(cnn_load("nonexistent_cnn_12345.bin") == NULL);
+
+    Board board;
+    board_init(&board);
+    board.cells[7][7] = CELL_BLACK;
+    board.cells[7][8] = CELL_BLACK;
+    board.cells[8][8] = CELL_WHITE;
+
+    CHECK(eval_position_with_nnue(&board, CELL_BLACK, NULL)
+          == eval_position(&board, CELL_BLACK));
+}
+
+static void test_vcf_black_avoids_forbidden_path(void) {
+    /* 黑方若落 (7,7) 会在横竖两方向形成双四禁手，search_find_vcf 绝不可选中禁手点 */
+    Board board;
+    board_init(&board);
+    board.cells[7][5] = CELL_BLACK;
+    board.cells[7][6] = CELL_BLACK;
+    board.cells[7][8] = CELL_BLACK;
+    board.cells[5][7] = CELL_BLACK;
+    board.cells[6][7] = CELL_BLACK;
+    board.cells[8][7] = CELL_BLACK;
+    board.cells[3][3] = CELL_WHITE;
+    board.cells[3][4] = CELL_WHITE;
+
+    Move win_move = {-1, -1};
+    uint64_t nodes = 0;
+    bool found = search_find_vcf(&board, CELL_BLACK, 6, 1.0, &win_move, &nodes);
+    if (found) {
+        CHECK(!(win_move.row == 7 && win_move.col == 7));
+        CHECK(rules_is_legal_move(&board, win_move.row, win_move.col, CELL_BLACK));
+    }
+}
+
+static void test_search_respects_tight_time_budget(void) {
+    Board board;
+    board_init(&board);
+    board.cells[7][7] = CELL_BLACK;
+    board.cells[7][8] = CELL_WHITE;
+    board.cells[8][7] = CELL_BLACK;
+    board.cells[6][6] = CELL_WHITE;
+    board.cells[8][8] = CELL_BLACK;
+    board.cells[6][8] = CELL_WHITE;
+    board.cells[9][6] = CELL_BLACK;
+    board.cells[9][7] = CELL_WHITE;
+
+    SearchConfig cfg = search_default_config();
+    cfg.max_depth = 6;
+    cfg.time_limit_sec = 0.15;
+
+    Move last = {9, 7};
+    SearchResult res = search_find_best_move(&board, CELL_BLACK, last, &cfg, NULL, NULL);
+    CHECK(res.valid);
+    CHECK(rules_is_legal_move(&board, res.best_move.row, res.best_move.col, CELL_BLACK));
+    CHECK(res.stats.elapsed_sec < 0.60);
+}
+
+static void test_eval_broken_four_and_jump_three(void) {
+    Board board;
+    board_init(&board);
+    /* 第 7 行跳冲四：X X X . X */
+    board.cells[7][3] = CELL_BLACK;
+    board.cells[7][4] = CELL_BLACK;
+    board.cells[7][5] = CELL_BLACK;
+    board.cells[7][7] = CELL_BLACK;
+    /* 第 9 行跳活三：. X . X X . */
+    board.cells[9][4] = CELL_BLACK;
+    board.cells[9][6] = CELL_BLACK;
+    board.cells[9][7] = CELL_BLACK;
+
+    EvalFeatures feat;
+    eval_extract_features(&board, CELL_BLACK, &feat);
+    CHECK(feat.values[4] >= 1.0f); /* my_rush_four */
+    CHECK(feat.values[6] >= 1.0f); /* my_open_three */
+}
+
 int main(void) {
     test_board_undo_and_rule_probes();
     test_search_immediate_win();
@@ -232,6 +311,10 @@ int main(void) {
     test_vcf_three_step_win();
     test_block_open_three();
     test_pvs_root_verification_avoids_blunder();
+    test_nn_missing_file_fallback();
+    test_vcf_black_avoids_forbidden_path();
+    test_search_respects_tight_time_budget();
+    test_eval_broken_four_and_jump_three();
 
     if (failures != 0) {
         fprintf(stderr, "%d AI test(s) failed.\n", failures);

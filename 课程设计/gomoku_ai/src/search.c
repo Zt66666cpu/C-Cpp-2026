@@ -1071,6 +1071,20 @@ static PnnueTTEntry *acquire_pnnue_tt(uint32_t *out_gen) {
     return g_pnnue_tt;
 }
 
+typedef struct {
+    Move move;
+    int score;
+    int heur;
+} PnnueScoredMove;
+
+static int compare_pnnue_scored_desc(const void *a, const void *b) {
+    const PnnueScoredMove *ma = (const PnnueScoredMove *)a;
+    const PnnueScoredMove *mb = (const PnnueScoredMove *)b;
+    if (ma->score < mb->score) return 1;
+    if (ma->score > mb->score) return -1;
+    return 0;
+}
+
 static int generate_pnnue_moves(
     Board *board,
     Cell player,
@@ -1078,11 +1092,14 @@ static int generate_pnnue_moves(
     Move tt_move,
     const PnnueSearchState *state,
     Move *out_moves,
+    int *out_heurs,
     int max_moves
 ) {
-    ScoredMove scored[BOARD_CELLS];
+    PnnueScoredMove scored[BOARD_CELLS];
+    float logits[BOARD_CELLS];
     int count = 0;
     int side_idx = (player == CELL_BLACK) ? 0 : 1;
+    float max_logit = -1e30f;
 
     for (int r = 0; r < BOARD_SIZE; ++r) {
         for (int c = 0; c < BOARD_SIZE; ++c) {
@@ -1093,19 +1110,13 @@ static int generate_pnnue_moves(
             Move m = {r, c};
             float logit = pnnue_eval_policy_cell(state->acc, state->pnnue, r, c, player);
             int h = eval_move_heuristic(board, r, c, player);
-            int s = (int)(logit * 1200.0f) + (h / 2);
-
-            if (same_move(m, tt_move)) {
-                s += 5000000;
-            } else if (ply < MAX_PLY && same_move(m, state->killers[ply][0])) {
-                s += 250000;
-            } else if (ply < MAX_PLY && same_move(m, state->killers[ply][1])) {
-                s += 180000;
+            if (count == 0 || logit > max_logit) {
+                max_logit = logit;
             }
-            s += state->history[side_idx][r * BOARD_SIZE + c];
-
+            logits[count] = logit;
             scored[count].move = m;
-            scored[count].score = s;
+            scored[count].heur = h;
+            scored[count].score = h;
             ++count;
         }
     }
@@ -1114,22 +1125,54 @@ static int generate_pnnue_moves(
         for (int r = 0; r < BOARD_SIZE; ++r) {
             for (int c = 0; c < BOARD_SIZE; ++c) {
                 if (rules_is_legal_move(board, r, c, player)) {
+                    float logit = pnnue_eval_policy_cell(state->acc, state->pnnue, r, c, player);
+                    int h = eval_move_heuristic(board, r, c, player);
+                    if (count == 0 || logit > max_logit) {
+                        max_logit = logit;
+                    }
+                    logits[count] = logit;
                     scored[count].move.row = r;
                     scored[count].move.col = c;
-                    scored[count].score = (int)(
-                        pnnue_eval_policy_cell(state->acc, state->pnnue, r, c, player) * 1200.0f
-                    ) + (eval_move_heuristic(board, r, c, player) / 2);
+                    scored[count].heur = h;
+                    scored[count].score = h;
                     ++count;
                 }
             }
         }
     }
 
-    qsort(scored, (size_t)count, sizeof(ScoredMove), compare_scored_moves_desc);
+    for (int i = 0; i < count; ++i) {
+        Move m = scored[i].move;
+        float rel = logits[i] - max_logit;
+        int policy_bonus = (rel > -4.0f) ? (int)((rel + 4.0f) * 900.0f) : 0;
+        int s = scored[i].heur + policy_bonus;
+
+        if (same_move(m, tt_move)) {
+            s += 5000000;
+        } else if (ply < MAX_PLY && same_move(m, state->killers[ply][0])) {
+            s += 250000;
+        } else if (ply < MAX_PLY && same_move(m, state->killers[ply][1])) {
+            s += 180000;
+        }
+        s += state->history[side_idx][m.row * BOARD_SIZE + m.col];
+
+        scored[i].score = s;
+    }
+
+    qsort(scored, (size_t)count, sizeof(PnnueScoredMove), compare_pnnue_scored_desc);
 
     int out_count = count < max_moves ? count : max_moves;
+    for (int i = out_count; i < count && out_count < max_moves + 4; ++i) {
+        if (scored[i].heur >= 2400) {
+            out_count = i + 1;
+        } else {
+            break;
+        }
+    }
+
     for (int i = 0; i < out_count; ++i) {
         out_moves[i] = scored[i].move;
+        if (out_heurs) out_heurs[i] = scored[i].heur;
     }
     return out_count;
 }
@@ -1172,22 +1215,18 @@ static int negamax_pnnue(
     }
 
     if (depth <= 0) {
-        int lin_score = eval_position(board, player);
-        if (lin_score >= MATE_BOUND || lin_score <= -MATE_BOUND) {
-            return lin_score;
-        }
         float val = pnnue_eval_value(state->acc, state->pnnue, player);
-        int nn_score = (int)(val * 22000.0f);
-        int blended = nn_score + (lin_score / 2);
-        if (blended > EVAL_MAX_STATIC_SCORE) blended = EVAL_MAX_STATIC_SCORE;
-        if (blended < -EVAL_MAX_STATIC_SCORE) blended = -EVAL_MAX_STATIC_SCORE;
-        return blended;
+        int nn_score = (int)(val * 60000.0f);
+        if (nn_score > EVAL_MAX_STATIC_SCORE) nn_score = EVAL_MAX_STATIC_SCORE;
+        if (nn_score < -EVAL_MAX_STATIC_SCORE) nn_score = -EVAL_MAX_STATIC_SCORE;
+        return nn_score;
     }
 
     Move candidates[24];
-    int limit = depth >= 3 ? 20 : 16;
+    int cand_heurs[24];
+    int limit = depth >= 3 ? 16 : 12;
     int cand_count = generate_pnnue_moves(
-        board, player, ply, tt_move, state, candidates, limit
+        board, player, ply, tt_move, state, candidates, cand_heurs, limit
     );
     if (cand_count == 0) {
         return -(EVAL_MATE_SCORE - ply);
@@ -1221,8 +1260,7 @@ static int negamax_pnnue(
             score = -negamax_pnnue(board, opp, depth - 1, ply + 1, -beta, -alpha, state);
         } else {
             int reduction = 0;
-            if (depth >= 4 && i >= 6
-                && eval_move_heuristic(board, m.row, m.col, player) < 4000) {
+            if (depth >= 4 && i >= 6 && cand_heurs[i] < 2400) {
                 reduction = (depth >= 6 && i >= 10) ? 2 : 1;
             }
             int search_d = depth - 1 - reduction;
@@ -1389,7 +1427,7 @@ SearchResult search_find_best_move_pnnue(
 
     Move root_moves[28];
     Move no_tt = {-1, -1};
-    int root_count = generate_pnnue_moves(board, player, 0, no_tt, &state, root_moves, 24);
+    int root_count = generate_pnnue_moves(board, player, 0, no_tt, &state, root_moves, NULL, 24);
     if (root_count == 0) {
         free(acc);
         return result;

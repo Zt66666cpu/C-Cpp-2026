@@ -377,6 +377,15 @@ def main() -> None:
     parser.add_argument("--teacher-bin", type=str, default="")
     parser.add_argument("--teacher-games", type=int, default=0)
     parser.add_argument("--teacher-time-ms", type=int, default=80)
+    parser.add_argument("--sparring-games", type=int, default=0)
+    parser.add_argument("--sparring-depth", type=int, default=5)
+    parser.add_argument("--sparring-time", type=float, default=0.5)
+    parser.add_argument(
+        "--min-heur-score",
+        type=float,
+        default=0.58,
+        help="晋级外部锚点最低阈值：候选对 Heuristic 胜率须 >= 该值方允许覆盖冠军",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run-dir", type=str, default="training/runs_v3")
     parser.add_argument("--device", type=str, default="auto")
@@ -528,6 +537,26 @@ def main() -> None:
             dist_data = load_npz_dataset(dist_tmp)
             merged = merge_replay_buffer(buf_path, dist_data, args.max_buffer)
 
+        sparring_stats = None
+        if args.teacher_bin and args.sparring_games > 0:
+            from rapfi_teacher import sparring_pnnue_vs_rapfi
+
+            t_rapfi = Path(args.teacher_bin)
+            sp_rapfi_data, sparring_stats = sparring_pnnue_vs_rapfi(
+                lib_path=lib_path,
+                pnnue_path=champ_bin if champ_bin.exists() else None,
+                rapfi_bin=t_rapfi,
+                num_games=args.sparring_games,
+                workers=min(8, args.workers),
+                our_depth=args.sparring_depth,
+                vcf_depth=args.vcf_depth,
+                our_time=args.sparring_time,
+                teacher_time_ms=args.teacher_time_ms,
+                seed=args.seed + rnd * 65537,
+            )
+            if sp_rapfi_data:
+                merged = merge_replay_buffer(buf_path, sp_rapfi_data, args.max_buffer)
+
         t_trn = time.time()
         cand_model = copy.deepcopy(model)
         trn_stats = train_pnnue_epoch_loop(
@@ -564,37 +593,68 @@ def main() -> None:
             b_cnn_w=0.0,
             seed=args.seed + rnd * 17,
         )
-        promoted = gate_champ["score"] >= args.gate_thresh and gate_champ["illegal"] == 0
+        gate_ok = gate_champ["score"] >= args.gate_thresh and gate_champ["illegal"] == 0
         print(
             f"[Gate V3 vs Champ] W={gate_champ['wins']} L={gate_champ['losses']} "
             f"D={gate_champ['draws']} score={gate_champ['score']:.3f} -> "
-            f"{'PROMOTED' if promoted else 'ROLLBACK'}"
+            f"{'CHECK_ANCHOR' if gate_ok else 'ROLLBACK'}"
         )
 
-        if promoted:
-            model = cand_model
-            export_pnnue_bin(model, champ_bin)
-            export_pnnue_bin(model, prod_bin)
-            torch.save({"model": model.state_dict(), "round": rnd}, ckpt_path)
+        promoted = False
+        vs_heur = None
+        cand_gate_heur = None
+        if gate_ok:
+            cand_vs_heur = run_pnnue_arena_parallel(
+                lib_path=lib_path,
+                pnnue_a_path=cand_bin,
+                pnnue_b_path=None,
+                v2_b_nnue_path=None,
+                v2_b_cnn_path=None,
+                num_games=args.eval_games,
+                workers=args.workers,
+                a_depth=args.eval_depth,
+                a_vcf=args.vcf_depth,
+                a_time=args.eval_time,
+                b_depth=args.eval_depth,
+                b_vcf=args.vcf_depth,
+                b_time=args.eval_time,
+                b_cnn_w=0.0,
+                seed=args.seed + rnd * 29,
+            )
+            cand_gate_heur = round(cand_vs_heur["score"], 4)
+            anchor_ok = cand_vs_heur["score"] >= args.min_heur_score and cand_vs_heur["illegal"] == 0
+            print(
+                f"[Gate Anchor vs Heuristic] W={cand_vs_heur['wins']} L={cand_vs_heur['losses']} "
+                f"D={cand_vs_heur['draws']} score={cand_vs_heur['score']:.3f} "
+                f"(min={args.min_heur_score:.3f}) -> {'PROMOTED' if anchor_ok else 'REJECTED'}"
+            )
+            if anchor_ok:
+                promoted = True
+                model = cand_model
+                export_pnnue_bin(model, champ_bin)
+                export_pnnue_bin(model, prod_bin)
+                torch.save({"model": model.state_dict(), "round": rnd}, ckpt_path)
+                vs_heur = cand_vs_heur
 
         eval_target = champ_bin
-        vs_heur = run_pnnue_arena_parallel(
-            lib_path=lib_path,
-            pnnue_a_path=eval_target,
-            pnnue_b_path=None,
-            v2_b_nnue_path=None,
-            v2_b_cnn_path=None,
-            num_games=args.eval_games,
-            workers=args.workers,
-            a_depth=args.eval_depth,
-            a_vcf=args.vcf_depth,
-            a_time=args.eval_time,
-            b_depth=args.eval_depth,
-            b_vcf=args.vcf_depth,
-            b_time=args.eval_time,
-            b_cnn_w=0.0,
-            seed=args.seed + rnd * 29,
-        )
+        if vs_heur is None:
+            vs_heur = run_pnnue_arena_parallel(
+                lib_path=lib_path,
+                pnnue_a_path=eval_target,
+                pnnue_b_path=None,
+                v2_b_nnue_path=None,
+                v2_b_cnn_path=None,
+                num_games=args.eval_games,
+                workers=args.workers,
+                a_depth=args.eval_depth,
+                a_vcf=args.vcf_depth,
+                a_time=args.eval_time,
+                b_depth=args.eval_depth,
+                b_vcf=args.vcf_depth,
+                b_time=args.eval_time,
+                b_cnn_w=0.0,
+                seed=args.seed + rnd * 29,
+            )
         vs_v2 = None
         if v2_nnue_bin.exists() or v2_cnn_bin.exists():
             vs_v2 = run_pnnue_arena_parallel(
@@ -634,10 +694,12 @@ def main() -> None:
             "val_top1": trn_stats["val_top1"],
             "best_ep": trn_stats["best_ep"],
             "gate_score": round(gate_champ["score"], 4),
+            "cand_gate_heur": cand_gate_heur,
             "promoted": promoted,
             "prod_deployed": promoted,
             "vs_heuristic": vs_heur,
             "vs_v2": vs_v2,
+            "sparring": sparring_stats,
         }
         append_metrics(metrics_path, record)
         print(

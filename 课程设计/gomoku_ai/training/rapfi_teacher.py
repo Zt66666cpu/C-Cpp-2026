@@ -22,6 +22,7 @@ from engine_bridge import (
     extract_state,
     find_engine_lib,
     step_search,
+    step_search_pnnue,
 )
 
 OPEN_OFFSETS: Tuple[Tuple[int, int], ...] = (
@@ -628,6 +629,295 @@ def eval_vs_rapfi_parallel(
         deterministic_openings=True,
     )
     return stats
+
+
+def _worker_sparring_pnnue(
+    args: Tuple,
+) -> Tuple[Dict[str, np.ndarray], int, int, int, int, float, float, int, int]:
+    (
+        lib_path_str,
+        pnnue_path_str,
+        rapfi_bin_str,
+        num_games,
+        our_depth,
+        vcf_depth,
+        our_time,
+        teacher_time_ms,
+        base_seed,
+    ) = args
+
+    lib = _bind_lib(Path(lib_path_str))
+    handle = (
+        lib.gomoku_load_pnnue(pnnue_path_str.encode("utf-8"))
+        if pnnue_path_str
+        else None
+    )
+    rng = np.random.default_rng(base_seed)
+
+    all_boards: List[np.ndarray] = []
+    all_players: List[np.uint8] = []
+    all_forb: List[np.ndarray] = []
+    all_pol: List[np.ndarray] = []
+    all_vals: List[float] = []
+    all_out: List[float] = []
+
+    a_wins = 0
+    b_wins = 0
+    draws = 0
+    illegal = 0
+    a_time_sum = 0.0
+    b_time_sum = 0.0
+    a_moves = 0
+    b_moves = 0
+
+    try:
+        with RapfiClient(Path(rapfi_bin_str)) as rapfi:
+            rapfi.start_game(
+                rule=4, timeout_turn_ms=teacher_time_ms, max_memory_mb=192, threads=1
+            )
+            for g in range(num_games):
+                if g > 0:
+                    rapfi.restart_board()
+                    rapfi._send("INFO rule 4")
+                    rapfi._send(f"INFO timeout_turn {teacher_time_ms}")
+                    rapfi._send("INFO thread_num 1")
+
+                our_is_black = g % 2 == 0
+                our_player = 1 if our_is_black else 2
+                rapfi_player = 2 if our_is_black else 1
+
+                open_moves = _make_opening_moves(
+                    rng, lib, pair_idx=None, seed=int(base_seed + g)
+                )
+                moves_history: List[Tuple[int, int, int]] = list(open_moves)
+
+                board = np.zeros(BOARD_CELLS, dtype=np.uint8)
+                for r, c, p in open_moves:
+                    board[r * BOARD_SIZE + c] = p
+                last_r, last_c, last_p = open_moves[-1]
+                last_move = last_r * BOARD_SIZE + last_c
+                player = 2 if last_p == 1 else 1
+                winner = 0
+
+                game_records: List[
+                    Tuple[bool, np.ndarray, int, np.ndarray, np.ndarray, float]
+                ] = []
+                need_board_init = True
+
+                for ply in range(len(open_moves), BOARD_CELLS):
+                    if np.all(board != 0):
+                        winner = 0
+                        break
+
+                    if player == our_player:
+                        t0 = time.perf_counter()
+                        move_idx, sval, pol, forb = step_search_pnnue(
+                            lib,
+                            handle,
+                            board,
+                            player,
+                            last_move,
+                            our_depth,
+                            vcf_depth,
+                            our_time,
+                            0.15 if ply < 10 else 0.0,
+                            int(base_seed + g * 1009 + ply),
+                        )
+                        a_time_sum += time.perf_counter() - t0
+                        a_moves += 1
+
+                        if (
+                            move_idx < 0
+                            or move_idx >= BOARD_CELLS
+                            or board[move_idx] != 0
+                            or forb[move_idx] != 0
+                        ):
+                            illegal += 1
+                            winner = rapfi_player
+                            break
+
+                        r, c = move_idx // BOARD_SIZE, move_idx % BOARD_SIZE
+                        game_records.append(
+                            (
+                                False,
+                                board.copy().reshape(BOARD_SIZE, BOARD_SIZE),
+                                player,
+                                forb.copy(),
+                                pol,
+                                float(sval),
+                            )
+                        )
+
+                        board[move_idx] = player
+                        moves_history.append((r, c, player))
+                        last_move = move_idx
+                        if _is_five_in_row(board, r, c, player):
+                            winner = player
+                            break
+                        player = rapfi_player
+                    else:
+                        forb, _ = extract_state(lib, board, player)
+                        t0 = time.perf_counter()
+                        if need_board_init:
+                            r, c, tval = rapfi.play_board(moves_history, rapfi_player)
+                            need_board_init = False
+                        else:
+                            lr, lc = last_move // BOARD_SIZE, last_move % BOARD_SIZE
+                            r, c, tval = rapfi.play_turn(lr, lc)
+                        b_time_sum += time.perf_counter() - t0
+                        b_moves += 1
+
+                        move_idx = r * BOARD_SIZE + c
+                        if (
+                            not (0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE)
+                            or board[move_idx] != 0
+                            or (player == 1 and forb[move_idx] != 0)
+                        ):
+                            winner = our_player
+                            break
+
+                        forb_for_pol = forb if player == 1 else np.zeros_like(forb)
+                        pol = _teacher_policy(board, forb_for_pol, r, c)
+                        game_records.append(
+                            (
+                                True,
+                                board.copy().reshape(BOARD_SIZE, BOARD_SIZE),
+                                player,
+                                forb.copy(),
+                                pol,
+                                float(tval) if tval is not None else 0.0,
+                            )
+                        )
+
+                        board[move_idx] = player
+                        moves_history.append((r, c, player))
+                        last_move = move_idx
+                        if _is_five_in_row(board, r, c, player):
+                            winner = player
+                            break
+                        player = our_player
+
+                if winner == 0:
+                    draws += 1
+                elif winner == our_player:
+                    a_wins += 1
+                else:
+                    b_wins += 1
+
+                for is_teacher, b2d_snap, p_snap, f_snap, pol_snap, sv_snap in game_records:
+                    if not is_teacher and winner != our_player:
+                        continue
+                    out_val = (
+                        0.0 if winner == 0 else (1.0 if p_snap == winner else -1.0)
+                    )
+                    sval_use = (
+                        out_val
+                        if (is_teacher and sv_snap == 0.0 and winner != 0)
+                        else sv_snap
+                    )
+                    all_boards.append(b2d_snap)
+                    all_players.append(np.uint8(p_snap))
+                    all_forb.append(f_snap)
+                    all_pol.append(pol_snap)
+                    all_vals.append(float(sval_use))
+                    all_out.append(float(out_val))
+    finally:
+        if handle:
+            lib.gomoku_free_pnnue(handle)
+
+    data: Dict[str, np.ndarray] = {}
+    if all_boards:
+        data = {
+            "boards": np.stack(all_boards, axis=0).astype(np.uint8),
+            "players": np.array(all_players, dtype=np.uint8),
+            "forbidden": np.stack(all_forb, axis=0).astype(np.uint8),
+            "policies": np.stack(all_pol, axis=0).astype(np.float32),
+            "values": np.array(all_vals, dtype=np.float32),
+            "outcomes": np.array(all_out, dtype=np.float32),
+        }
+    return data, a_wins, b_wins, draws, illegal, a_time_sum, b_time_sum, a_moves, b_moves
+
+
+def sparring_pnnue_vs_rapfi(
+    lib_path: Path,
+    pnnue_path: Optional[Path],
+    rapfi_bin: Path,
+    num_games: int,
+    workers: int,
+    our_depth: int,
+    vcf_depth: int,
+    our_time: float,
+    teacher_time_ms: int,
+    seed: int,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
+    p_str = str(pnnue_path) if (pnnue_path and Path(pnnue_path).exists()) else ""
+    eff_workers = max(1, min(workers, num_games))
+    counts = [num_games // eff_workers] * eff_workers
+    for i in range(num_games % eff_workers):
+        counts[i] += 1
+
+    tasks = []
+    for idx, gc in enumerate(counts):
+        if gc <= 0:
+            continue
+        tasks.append(
+            (
+                str(lib_path),
+                p_str,
+                str(rapfi_bin),
+                gc,
+                our_depth,
+                vcf_depth,
+                our_time,
+                teacher_time_ms,
+                seed + idx * 100003,
+            )
+        )
+
+    t0 = time.time()
+    if len(tasks) <= 1:
+        results = [_worker_sparring_pnnue(tasks[0])] if tasks else []
+    else:
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=len(tasks)) as pool:
+            results = pool.map(_worker_sparring_pnnue, tasks)
+
+    a_wins = 0
+    b_wins = 0
+    draws = 0
+    illegal = 0
+    data_parts: List[Dict[str, np.ndarray]] = []
+    for d, aw, bw, dr, ill, _, _, _, _ in results:
+        a_wins += aw
+        b_wins += bw
+        draws += dr
+        illegal += ill
+        if d:
+            data_parts.append(d)
+
+    merged: Dict[str, np.ndarray] = {}
+    if data_parts:
+        keys = data_parts[0].keys()
+        merged = {k: np.concatenate([p[k] for p in data_parts], axis=0) for k in keys}
+
+    elapsed = time.time() - t0
+    tot = max(1, a_wins + b_wins + draws)
+    score = float(a_wins + 0.5 * draws) / float(tot)
+    n_pos = int(merged["outcomes"].shape[0]) if merged else 0
+    stats = {
+        "wins": int(a_wins),
+        "losses": int(b_wins),
+        "draws": int(draws),
+        "illegal": int(illegal),
+        "score": round(score, 4),
+        "positions": n_pos,
+        "elapsed_sec": round(elapsed, 2),
+    }
+    print(
+        f"[Sparring V3 vs Rapfi] games={num_games} W={a_wins} L={b_wins} D={draws} "
+        f"score={score:.3f} pos={n_pos} in {elapsed:.1f}s"
+    )
+    return merged, stats
 
 
 def main() -> None:

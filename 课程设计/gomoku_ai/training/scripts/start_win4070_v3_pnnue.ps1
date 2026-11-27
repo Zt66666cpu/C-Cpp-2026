@@ -1,10 +1,10 @@
 param(
     [int]$Rounds = 8,
-    [int]$GamesPerRound = 480,
+    [int]$GamesPerRound = 240,
     [int]$Workers = 16,
     [int]$Depth = 6,
     [int]$VcfDepth = 14,
-    [double]$TimeLimit = 0.8,
+    [double]$TimeLimit = 0.6,
     [int]$Epochs = 4,
     [int]$BatchSize = 2048,
     [string]$Lr = "1.5e-4",
@@ -15,15 +15,19 @@ param(
     [int]$MaxBuffer = 220000,
     [int]$EvalGames = 64,
     [int]$EvalDepth = 5,
-    [double]$EvalTime = 0.7,
+    [double]$EvalTime = 1.0,
     [double]$GateThresh = 0.505,
+    [double]$MinHeurScore = 0.58,
     [string]$PretrainBuffer = "training/runs_v3/rapfi_distill.npz",
     [string]$DistillBuffer = "training/runs_v3/rapfi_distill_3000.npz",
     [int]$PretrainEpochs = 24,
     [switch]$ForcePretrain,
     [string]$TeacherBin = "",
-    [int]$TeacherGames = 200,
+    [int]$TeacherGames = 120,
     [int]$TeacherTimeMs = 60,
+    [int]$SparringGames = 160,
+    [int]$SparringDepth = 5,
+    [double]$SparringTime = 0.5,
     [switch]$Resume = $true,
     [string]$MonitorUrl = "http://192.168.137.4:8766",
     [string]$RunName = "gomoku-v3-pnnue"
@@ -78,7 +82,8 @@ $TrainArgs = @(
     "--eval-games", "$EvalGames",
     "--eval-depth", "$EvalDepth",
     "--eval-time", "$EvalTime",
-    "--gate-thresh", "$GateThresh"
+    "--gate-thresh", "$GateThresh",
+    "--min-heur-score", "$MinHeurScore"
 )
 $PretrainList = @()
 foreach ($pb in @($PretrainBuffer, $DistillBuffer)) {
@@ -97,12 +102,21 @@ if ($PretrainList.Count -gt 0) {
 if ($ForcePretrain) {
     $TrainArgs += "--force-pretrain"
 }
-if ($TeacherBin -and (Test-Path $TeacherBin) -and $TeacherGames -gt 0) {
+if ($TeacherBin -and (Test-Path $TeacherBin) -and ($TeacherGames -gt 0 -or $SparringGames -gt 0)) {
     $TrainArgs += @(
         "--teacher-bin", "$TeacherBin",
-        "--teacher-games", "$TeacherGames",
         "--teacher-time-ms", "$TeacherTimeMs"
     )
+    if ($TeacherGames -gt 0) {
+        $TrainArgs += @("--teacher-games", "$TeacherGames")
+    }
+    if ($SparringGames -gt 0) {
+        $TrainArgs += @(
+            "--sparring-games", "$SparringGames",
+            "--sparring-depth", "$SparringDepth",
+            "--sparring-time", "$SparringTime"
+        )
+    }
 }
 if ($Resume) {
     $TrainArgs += "--resume"

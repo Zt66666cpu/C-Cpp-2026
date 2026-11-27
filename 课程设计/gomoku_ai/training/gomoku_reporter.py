@@ -309,7 +309,10 @@ def _build_payload(
     )
 
     completed_rounds = len(rows)
-    if proc and cli.get("rounds"):
+    is_infinite = bool(proc and ("rounds" in cli) and int(cli["rounds"]) == 0)
+    if is_infinite:
+        max_rounds = max(completed_rounds + 1, (rows[-1]["round"] + 1) if rows else 1)
+    elif proc and cli.get("rounds"):
         if cli.get("resume") and resumed_from is not None:
             max_rounds = resumed_from + int(cli["rounds"])
         elif cli.get("resume"):
@@ -392,8 +395,11 @@ def _build_payload(
 
         intra_frac = max(0.02, min(0.96, intra_raw))
         progress = min(0.995, (completed_rounds + intra_frac) / max(1, max_rounds))
-        rem_after = max(0, max_rounds - completed_rounds - 1) * est_round
-        eta_hours = (rem_cur + rem_after) / 3600.0
+        if is_infinite:
+            eta_hours = None
+        else:
+            rem_after = max(0, max_rounds - completed_rounds - 1) * est_round
+            eta_hours = (rem_cur + rem_after) / 3600.0
 
     heur_scores = [
         float(r["vs_heuristic"]["score"])
@@ -408,9 +414,11 @@ def _build_payload(
     latest = rows[-1] if rows else None
     buf_pos = latest["buffer_positions"] if latest else 0
     if v3:
+        ver_tag = "V4-GPN2" if (cli.get("arch") == "v4" or " --arch v4" in str((proc or {}).get("command") or "")) else "Pattern-NNUE"
         arch = (
-            f"Pattern-NNUE 22143×{cli.get('dim') or 64}→V({cli.get('v_hidden') or 32})+P · "
+            f"{ver_tag} 22143×{cli.get('dim') or 64}→V({cli.get('v_hidden') or 32})+P · "
             f"depth={cli.get('depth') or 6} · 「vs V1」栏 = vs V2 基线"
+            + (" · 持续自进化" if is_infinite else "")
         )
     else:
         h1 = cli.get("nnue_h1") or (128 if phase == "v2" else 64)

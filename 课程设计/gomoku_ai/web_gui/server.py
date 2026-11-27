@@ -196,10 +196,31 @@ class GomokuEngineBridge:
             if self.pnnue_path.exists()
             else None
         )
+        self.pnnue_mtime: float = (
+            self.pnnue_path.stat().st_mtime if self.v3_handle is not None else 0.0
+        )
         v2_n = str(self.nnue_path).encode("utf-8") if self.nnue_path.exists() else b""
         v2_c = str(self.cnn_path).encode("utf-8") if self.cnn_path.exists() else b""
         self.v2_handle = self.lib.gomoku_load_models(v2_n, v2_c) if (v2_n or v2_c) else None
         self.heur_handle = self.lib.gomoku_load_models(b"", b"")
+
+    def _maybe_reload_pnnue(self) -> None:
+        if not self.pnnue_path.exists():
+            return
+        try:
+            st = self.pnnue_path.stat()
+        except OSError:
+            return
+        if st.st_size <= 0 or st.st_mtime <= self.pnnue_mtime + 0.5:
+            return
+        new_h = self.lib.gomoku_load_pnnue(str(self.pnnue_path).encode("utf-8"))
+        if new_h:
+            old_h = self.v3_handle
+            self.v3_handle = new_h
+            self.pnnue_mtime = st.st_mtime
+            if old_h:
+                self.lib.gomoku_free_pnnue(old_h)
+            print(f"[WebGUI] Hot-reloaded models/pnnue.bin (mtime={st.st_mtime:.1f})", flush=True)
 
     def close(self) -> None:
         with self.lock:
@@ -214,14 +235,23 @@ class GomokuEngineBridge:
                 self.heur_handle = None
 
     def info(self) -> Dict[str, Any]:
+        with self.lock:
+            self._maybe_reload_pnnue()
+            v3_ok = self.v3_handle is not None
+            updated = (
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.pnnue_mtime))
+                if self.pnnue_mtime > 0
+                else None
+            )
         return {
             "lib_path": str(self.lib_path),
             "board_size": BOARD_SIZE,
             "models": {
-                "v3": self.v3_handle is not None,
+                "v3": v3_ok,
                 "v2": self.v2_handle is not None,
                 "heuristic": self.heur_handle is not None,
             },
+            "pnnue_updated_at": updated,
         }
 
     def extract_forbidden(self, board: List[int], player: int) -> List[int]:
@@ -245,6 +275,7 @@ class GomokuEngineBridge:
         c_val = ctypes.c_float(0.0)
         c_logits = (ctypes.c_float * BOARD_CELLS)()
         with self.lock:
+            self._maybe_reload_pnnue()
             rc = self.lib.gomoku_eval_pnnue_debug(
                 c_board,
                 int(player),
@@ -299,6 +330,9 @@ class GomokuEngineBridge:
 
         t0 = time.perf_counter()
         with self.lock:
+            self._maybe_reload_pnnue()
+            if chosen == "v3" and self.v3_handle is None:
+                chosen = "v2" if self.v2_handle is not None else "heuristic"
             if chosen == "v3":
                 rc = self.lib.gomoku_step_search_pnnue(
                     self.v3_handle,

@@ -737,10 +737,17 @@ def verify_pnnue_parity(
             pat_ids = boards_to_pattern_ids(board.reshape(1, BOARD_SIZE, BOARD_SIZE))
             p_idx = 0 if player == 1 else 1
             with torch.no_grad():
-                pt_logits, pt_val = pnnue_model(
-                    torch.from_numpy(pat_ids).long(),
-                    torch.tensor([p_idx], dtype=torch.long),
-                )
+                if getattr(pnnue_model, "version", 1) == 2:
+                    pt_logits, pt_val = pnnue_model(
+                        torch.from_numpy(pat_ids).long(),
+                        torch.tensor([p_idx], dtype=torch.long),
+                        torch.from_numpy(board.reshape(1, BOARD_CELLS)).long(),
+                    )
+                else:
+                    pt_logits, pt_val = pnnue_model(
+                        torch.from_numpy(pat_ids).long(),
+                        torch.tensor([p_idx], dtype=torch.long),
+                    )
                 pt_logits_np = pt_logits.squeeze(0).numpy()
                 pt_val_f = float(pt_val.item())
 
@@ -1011,3 +1018,257 @@ def run_pnnue_arena_parallel(
         "cand_ms": cand_ms,
         "base_ms": base_ms,
     }
+
+
+def _check_five_in_row(board: np.ndarray, row: int, col: int, player: int) -> bool:
+    b2d = board.reshape(BOARD_SIZE, BOARD_SIZE)
+    for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        cnt = 1
+        for sign in (1, -1):
+            r, c = row + sign * dr, col + sign * dc
+            while 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE and b2d[r, c] == player:
+                cnt += 1
+                r += sign * dr
+                c += sign * dc
+        if (player == 1 and cnt == 5) or (player == 2 and cnt >= 5):
+            return True
+    return False
+
+
+def _worker_sparring_pnnue_v2(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int, int]:
+    (
+        lib_path_str,
+        pnnue_path_str,
+        v2_nnue_str,
+        v2_cnn_str,
+        num_games,
+        our_depth,
+        vcf_depth,
+        our_time,
+        base_seed,
+    ) = args
+
+    lib = _bind_lib(Path(lib_path_str))
+    p_handle = lib.gomoku_load_pnnue(pnnue_path_str.encode("utf-8")) if pnnue_path_str else None
+    v2_handle = lib.gomoku_load_models(
+        v2_nnue_str.encode("utf-8") if v2_nnue_str else b"",
+        v2_cnn_str.encode("utf-8") if v2_cnn_str else b"",
+    )
+    rng = np.random.default_rng(base_seed)
+
+    all_boards: List[np.ndarray] = []
+    all_players: List[np.uint8] = []
+    all_forb: List[np.ndarray] = []
+    all_pol: List[np.ndarray] = []
+    all_vals: List[float] = []
+    all_out: List[float] = []
+
+    a_wins = 0
+    b_wins = 0
+    draws = 0
+    illegal = 0
+    v2_cnn_w = 0.35 if v2_cnn_str else 0.0
+
+    try:
+        for g in range(num_games):
+            our_is_black = g % 2 == 0
+            our_player = 1 if our_is_black else 2
+            v2_player = 2 if our_is_black else 1
+
+            board = np.zeros(BOARD_CELLS, dtype=np.uint8)
+            r1 = 7 + int(rng.integers(-2, 3))
+            c1 = 7 + int(rng.integers(-2, 3))
+            board[r1 * BOARD_SIZE + c1] = 1
+            moves_hist: List[Tuple[int, int, int]] = [(r1, c1, 1)]
+            target_open = int(rng.integers(2, 5))
+            cur_p = 2
+            for _ in range(1, target_open):
+                forb, _ = extract_state(lib, board, cur_p)
+                legal = np.where((board == 0) & ((forb == 0) if cur_p == 1 else True))[0]
+                if legal.size == 0:
+                    break
+                near = [
+                    int(idx)
+                    for idx in legal
+                    if any(
+                        abs((idx // BOARD_SIZE) - mr) <= 2 and abs((idx % BOARD_SIZE) - mc) <= 2
+                        for mr, mc, _ in moves_hist
+                    )
+                ]
+                cand_pool = [
+                    idx
+                    for idx in (near if near else legal.tolist())
+                    if not _check_five_in_row(board, idx // BOARD_SIZE, idx % BOARD_SIZE, cur_p)
+                ]
+                pool = cand_pool if cand_pool else (near if near else legal.tolist())
+                pick = int(rng.choice(pool))
+                pr, pc = pick // BOARD_SIZE, pick % BOARD_SIZE
+                board[pick] = cur_p
+                moves_hist.append((pr, pc, cur_p))
+                cur_p = 2 if cur_p == 1 else 1
+
+            last_r, last_c, last_p = moves_hist[-1]
+            last_move = last_r * BOARD_SIZE + last_c
+            player = 2 if last_p == 1 else 1
+            winner = 0
+            game_records: List[Tuple[np.ndarray, int, np.ndarray, np.ndarray, float]] = []
+
+            for ply in range(len(moves_hist), BOARD_CELLS):
+                if np.all(board != 0):
+                    winner = 0
+                    break
+
+                temp = 0.15 if ply < 10 else 0.0
+                seed_step = int(base_seed + g * 1009 + ply)
+                if player == our_player:
+                    move_idx, sval, pol, forb = step_search_pnnue(
+                        lib, p_handle, board, player, last_move,
+                        our_depth, vcf_depth, our_time, temp, seed_step,
+                    )
+                else:
+                    move_idx, sval, pol, forb, _ = step_search(
+                        lib, v2_handle, board, player, last_move,
+                        our_depth, vcf_depth, our_time, temp, v2_cnn_w, seed_step,
+                    )
+
+                if (
+                    move_idx < 0
+                    or move_idx >= BOARD_CELLS
+                    or board[move_idx] != 0
+                    or (player == 1 and forb[move_idx] != 0)
+                ):
+                    if player == our_player:
+                        illegal += 1
+                    winner = 2 if player == 1 else 1
+                    break
+
+                game_records.append(
+                    (
+                        board.copy().reshape(BOARD_SIZE, BOARD_SIZE),
+                        player,
+                        forb.copy(),
+                        pol,
+                        float(sval),
+                    )
+                )
+                r, c = move_idx // BOARD_SIZE, move_idx % BOARD_SIZE
+                board[move_idx] = player
+                last_move = move_idx
+                if _check_five_in_row(board, r, c, player):
+                    winner = player
+                    break
+                player = v2_player if player == our_player else our_player
+
+            if winner == 0:
+                draws += 1
+            elif winner == our_player:
+                a_wins += 1
+            else:
+                b_wins += 1
+
+            for b2d_snap, p_snap, f_snap, pol_snap, sv_snap in game_records:
+                if winner != 0 and p_snap != winner:
+                    continue
+                out_val = 0.0 if winner == 0 else 1.0
+                all_boards.append(b2d_snap)
+                all_players.append(np.uint8(p_snap))
+                all_forb.append(f_snap)
+                all_pol.append(pol_snap)
+                all_vals.append(float(sv_snap))
+                all_out.append(float(out_val))
+    finally:
+        if p_handle:
+            lib.gomoku_free_pnnue(p_handle)
+        lib.gomoku_free_models(v2_handle)
+
+    data: Dict[str, np.ndarray] = {}
+    if all_boards:
+        data = {
+            "boards": np.stack(all_boards, axis=0).astype(np.uint8),
+            "players": np.array(all_players, dtype=np.uint8),
+            "forbidden": np.stack(all_forb, axis=0).astype(np.uint8),
+            "policies": np.stack(all_pol, axis=0).astype(np.float32),
+            "values": np.array(all_vals, dtype=np.float32),
+            "outcomes": np.array(all_out, dtype=np.float32),
+        }
+    return data, a_wins, b_wins, draws, illegal
+
+
+def sparring_pnnue_vs_v2(
+    lib_path: Path,
+    pnnue_path: Optional[Path],
+    v2_nnue_path: Optional[Path],
+    v2_cnn_path: Optional[Path],
+    num_games: int,
+    workers: int,
+    our_depth: int,
+    vcf_depth: int,
+    our_time: float,
+    seed: int,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
+    import time
+
+    p_str = str(pnnue_path) if (pnnue_path and Path(pnnue_path).exists()) else ""
+    vn_str = str(v2_nnue_path) if (v2_nnue_path and Path(v2_nnue_path).exists()) else ""
+    vc_str = str(v2_cnn_path) if (v2_cnn_path and Path(v2_cnn_path).exists()) else ""
+
+    eff_workers = max(1, min(workers, num_games))
+    counts = [num_games // eff_workers] * eff_workers
+    for i in range(num_games % eff_workers):
+        counts[i] += 1
+
+    tasks = []
+    for idx, gc in enumerate(counts):
+        if gc <= 0:
+            continue
+        tasks.append(
+            (
+                str(lib_path),
+                p_str,
+                vn_str,
+                vc_str,
+                gc,
+                our_depth,
+                vcf_depth,
+                our_time,
+                seed + idx * 100003,
+            )
+        )
+
+    t0 = time.time()
+    if len(tasks) <= 1:
+        results = [_worker_sparring_pnnue_v2(tasks[0])] if tasks else []
+    else:
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=len(tasks)) as pool:
+            results = pool.map(_worker_sparring_pnnue_v2, tasks)
+
+    a_wins = sum(r[1] for r in results)
+    b_wins = sum(r[2] for r in results)
+    draws = sum(r[3] for r in results)
+    illegal = sum(r[4] for r in results)
+    parts = [r[0] for r in results if r[0]]
+    merged: Dict[str, np.ndarray] = {}
+    if parts:
+        keys = parts[0].keys()
+        merged = {k: np.concatenate([p[k] for p in parts], axis=0) for k in keys}
+
+    elapsed = time.time() - t0
+    tot = max(1, a_wins + b_wins + draws)
+    score = float(a_wins + 0.5 * draws) / float(tot)
+    n_pos = int(merged["outcomes"].shape[0]) if merged else 0
+    stats = {
+        "wins": int(a_wins),
+        "losses": int(b_wins),
+        "draws": int(draws),
+        "illegal": int(illegal),
+        "score": round(score, 4),
+        "positions": n_pos,
+        "elapsed_sec": round(elapsed, 2),
+    }
+    print(
+        f"[Sparring V3 vs V2] games={num_games} W={a_wins} L={b_wins} D={draws} "
+        f"score={score:.3f} pos={n_pos} in {elapsed:.1f}s"
+    )
+    return merged, stats
+

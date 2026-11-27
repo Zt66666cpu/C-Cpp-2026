@@ -1,6 +1,6 @@
 param(
-    [int]$Rounds = 8,
-    [int]$GamesPerRound = 240,
+    [int]$Rounds = 0,
+    [int]$GamesPerRound = 320,
     [int]$Workers = 16,
     [int]$Depth = 6,
     [int]$VcfDepth = 14,
@@ -12,22 +12,25 @@ param(
     [string]$WeightDecay = "1e-3",
     [int]$Dim = 64,
     [int]$VHidden = 32,
-    [int]$MaxBuffer = 220000,
+    [int]$MaxBuffer = 180000,
     [int]$EvalGames = 64,
     [int]$EvalDepth = 5,
     [double]$EvalTime = 1.0,
-    [double]$GateThresh = 0.505,
-    [double]$MinHeurScore = 0.58,
-    [string]$PretrainBuffer = "training/runs_v3/rapfi_distill.npz",
-    [string]$DistillBuffer = "training/runs_v3/rapfi_distill_3000.npz",
+    [double]$GateThresh = 0.515,
+    [double]$MinHeurScore = 0.60,
+    [string]$PretrainBuffer = "",
+    [string]$DistillBuffer = "",
     [int]$PretrainEpochs = 24,
     [switch]$ForcePretrain,
     [string]$TeacherBin = "",
-    [int]$TeacherGames = 120,
+    [int]$TeacherGames = 0,
     [int]$TeacherTimeMs = 60,
-    [int]$SparringGames = 160,
+    [int]$V2SparringGames = 160,
+    [int]$SparringGames = 120,
     [int]$SparringDepth = 5,
     [double]$SparringTime = 0.5,
+    [string]$Arch = "v4",
+    [string]$InitV3Backbone = "",
     [switch]$Resume = $true,
     [string]$MonitorUrl = "http://192.168.137.4:8766",
     [string]$RunName = "gomoku-v3-pnnue"
@@ -83,8 +86,19 @@ $TrainArgs = @(
     "--eval-depth", "$EvalDepth",
     "--eval-time", "$EvalTime",
     "--gate-thresh", "$GateThresh",
-    "--min-heur-score", "$MinHeurScore"
+    "--min-heur-score", "$MinHeurScore",
+    "--arch", "$Arch"
 )
+if ($InitV3Backbone -and (Test-Path (Join-Path $ProjectDir $InitV3Backbone))) {
+    $TrainArgs += @("--init-v3-backbone", "$InitV3Backbone")
+}
+if ($V2SparringGames -gt 0) {
+    $TrainArgs += @(
+        "--v2-sparring-games", "$V2SparringGames",
+        "--sparring-depth", "$SparringDepth",
+        "--sparring-time", "$SparringTime"
+    )
+}
 $PretrainList = @()
 foreach ($pb in @($PretrainBuffer, $DistillBuffer)) {
     if ($pb -and (Test-Path (Join-Path $ProjectDir $pb))) {
@@ -111,11 +125,13 @@ if ($TeacherBin -and (Test-Path $TeacherBin) -and ($TeacherGames -gt 0 -or $Spar
         $TrainArgs += @("--teacher-games", "$TeacherGames")
     }
     if ($SparringGames -gt 0) {
-        $TrainArgs += @(
-            "--sparring-games", "$SparringGames",
-            "--sparring-depth", "$SparringDepth",
-            "--sparring-time", "$SparringTime"
-        )
+        $TrainArgs += @("--sparring-games", "$SparringGames")
+        if ($V2SparringGames -le 0) {
+            $TrainArgs += @(
+                "--sparring-depth", "$SparringDepth",
+                "--sparring-time", "$SparringTime"
+            )
+        }
     }
 }
 if ($Resume) {

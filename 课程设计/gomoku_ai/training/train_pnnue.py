@@ -29,7 +29,13 @@ from engine_bridge import (
     run_pnnue_arena_parallel,
     verify_pnnue_parity,
 )
-from pnnue_model import PatternNnueNet, boards_to_pattern_ids, export_pnnue_bin
+from pnnue_model import (
+    PatternNnueNet,
+    PatternNnueV4Net,
+    boards_to_pattern_ids,
+    export_pnnue_bin,
+    load_backbone_from_v3_state,
+)
 
 
 def select_device(pref: str = "auto") -> torch.device:
@@ -145,7 +151,13 @@ def train_pnnue_epoch_loop(
     val_idx = perm[:val_n]
     trn_idx = perm[val_n:] if n > val_n else perm
 
+    is_v4 = getattr(model, "version", 1) == 2
     val_pat = torch.from_numpy(boards_to_pattern_ids(boards[val_idx])).long().to(device)
+    val_bflat = (
+        torch.from_numpy(boards[val_idx].reshape(-1, BOARD_CELLS)).long().to(device)
+        if is_v4
+        else None
+    )
     val_pidx = torch.from_numpy((players[val_idx] == 2).astype(np.int64)).to(device)
     val_legal = torch.from_numpy(
         ((boards[val_idx].reshape(-1, BOARD_CELLS) == 0) & (forbidden[val_idx] == 0))
@@ -172,8 +184,9 @@ def train_pnnue_epoch_loop(
         legal_t: torch.Tensor,
         pol_t: torch.Tensor,
         val_t: torch.Tensor,
+        bflat_t: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        logits, pred_v = model(pat_t, pidx_t)
+        logits, pred_v = model(pat_t, pidx_t, bflat_t)
         masked_logits = logits.masked_fill(~legal_t, -1e4 if use_amp else -1e9)
         log_probs = F.log_softmax(masked_logits, dim=-1)
 
@@ -206,6 +219,11 @@ def train_pnnue_epoch_loop(
             )
             pat_np = boards_to_pattern_ids(bb)
             pat_t = torch.from_numpy(pat_np).long().to(device, non_blocking=True)
+            bflat_t = (
+                torch.from_numpy(bb.reshape(-1, BOARD_CELLS)).long().to(device, non_blocking=True)
+                if is_v4
+                else None
+            )
             pidx_t = torch.from_numpy((players[b_idx] == 2).astype(np.int64)).to(device, non_blocking=True)
             legal_t = torch.from_numpy(((bb.reshape(-1, BOARD_CELLS) == 0) & (bf == 0))).to(
                 device, non_blocking=True
@@ -216,7 +234,7 @@ def train_pnnue_epoch_loop(
             optimizer.zero_grad(set_to_none=True)
             if use_amp and scaler is not None:
                 with torch.amp.autocast("cuda"):
-                    loss, _, _, _ = _compute_losses(pat_t, pidx_t, legal_t, pol_t, val_t)
+                    loss, _, _, _ = _compute_losses(pat_t, pidx_t, legal_t, pol_t, val_t, bflat_t)
                 scaler.scale(loss).backward()
                 if grad_clip > 0.0:
                     scaler.unscale_(optimizer)
@@ -224,7 +242,7 @@ def train_pnnue_epoch_loop(
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                loss, _, _, _ = _compute_losses(pat_t, pidx_t, legal_t, pol_t, val_t)
+                loss, _, _, _ = _compute_losses(pat_t, pidx_t, legal_t, pol_t, val_t, bflat_t)
                 loss.backward()
                 if grad_clip > 0.0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -249,6 +267,7 @@ def train_pnnue_epoch_loop(
                     val_legal[vs:ve],
                     val_pol_t[vs:ve],
                     val_y_t[vs:ve],
+                    val_bflat[vs:ve] if val_bflat is not None else None,
                 )
                 w = float(ve - vs)
                 v_losses.append(float(tl.item()) * w)
@@ -283,14 +302,19 @@ def append_metrics(metrics_path: Path, record: Dict) -> None:
         fp.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def run_verify_only(dim: int, v_hidden: int) -> None:
+def run_verify_only(
+    dim: int, v_hidden: int, arch: str = "v3", v_h1: int = 64, v_h2: int = 32
+) -> None:
     lib_path = find_engine_lib(PROJECT_ROOT)
-    model = PatternNnueNet(dim=dim, v_hidden=v_hidden)
+    if arch == "v4":
+        model = PatternNnueV4Net(dim=dim, v_h1=v_h1, v_h2=v_h2)
+    else:
+        model = PatternNnueNet(dim=dim, v_hidden=v_hidden)
     diffs = verify_pnnue_parity(lib_path, model, num_boards=10)
-    print(f"[Parity V3] lib={lib_path} diffs={json.dumps(diffs)}")
+    print(f"[Parity {arch.upper()}] lib={lib_path} diffs={json.dumps(diffs)}")
     if diffs["max_val_diff"] >= 1e-4 or diffs["max_pol_diff"] >= 1e-4:
-        raise AssertionError(f"Pattern-NNUE parity check failed: {diffs}")
-    print("[Parity V3] PASSED (< 1e-4)")
+        raise AssertionError(f"Pattern-NNUE ({arch}) parity check failed: {diffs}")
+    print(f"[Parity {arch.upper()}] PASSED (< 1e-4)")
 
 
 def run_smoke_test(dim: int, v_hidden: int) -> None:
@@ -369,6 +393,15 @@ def main() -> None:
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--dim", type=int, default=64)
     parser.add_argument("--v-hidden", type=int, default=32)
+    parser.add_argument("--arch", type=str, default="v4", choices=("v3", "v4"))
+    parser.add_argument("--v-h1", type=int, default=64)
+    parser.add_argument("--v-h2", type=int, default=32)
+    parser.add_argument(
+        "--init-v3-backbone",
+        type=str,
+        default="",
+        help="从旧 GPN1 (V3) checkpoint 迁移 emb/policy 骨干初始化 V4 模型",
+    )
     parser.add_argument("--max-buffer", type=int, default=200000)
     parser.add_argument("--eval-games", type=int, default=64)
     parser.add_argument("--eval-depth", type=int, default=5)
@@ -377,6 +410,7 @@ def main() -> None:
     parser.add_argument("--teacher-bin", type=str, default="")
     parser.add_argument("--teacher-games", type=int, default=0)
     parser.add_argument("--teacher-time-ms", type=int, default=80)
+    parser.add_argument("--v2-sparring-games", type=int, default=0)
     parser.add_argument("--sparring-games", type=int, default=0)
     parser.add_argument("--sparring-depth", type=int, default=5)
     parser.add_argument("--sparring-time", type=float, default=0.5)
@@ -393,7 +427,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.verify_only:
-        run_verify_only(args.dim, args.v_hidden)
+        run_verify_only(args.dim, args.v_hidden, arch=args.arch, v_h1=args.v_h1, v_h2=args.v_h2)
         return
     if args.smoke_test:
         run_smoke_test(args.dim, args.v_hidden)
@@ -416,12 +450,27 @@ def main() -> None:
     v2_nnue_bin = PROJECT_ROOT / "models" / "nnue.bin"
     v2_cnn_bin = PROJECT_ROOT / "models" / "cnn.bin"
 
-    model = PatternNnueNet(dim=args.dim, v_hidden=args.v_hidden)
+    def _make_model(arch_name: str):
+        if arch_name == "v4":
+            return PatternNnueV4Net(dim=args.dim, v_h1=args.v_h1, v_h2=args.v_h2)
+        return PatternNnueNet(dim=args.dim, v_hidden=args.v_hidden)
+
+    active_arch = args.arch
+    model = _make_model(active_arch)
     start_round = 1
     resumed = False
     if args.resume and ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-        model.load_state_dict(ckpt["model"])
+        sd = ckpt["model"]
+        ckpt_arch = "v4" if "v2_w1" in sd else "v3"
+        if active_arch == "v4" and ckpt_arch == "v3":
+            load_backbone_from_v3_state(model, sd)
+            print("[Trainer V4] Initialized V4 backbone (emb/policy) from V3 checkpoint")
+        else:
+            if ckpt_arch != active_arch:
+                active_arch = ckpt_arch
+                model = _make_model(active_arch)
+            model.load_state_dict(sd)
         max_logged_round = 0
         if metrics_path.exists():
             for ln in metrics_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -436,7 +485,15 @@ def main() -> None:
                     continue
         start_round = max(int(ckpt.get("round", 0)), max_logged_round) + 1
         resumed = True
-        print(f"[Trainer V3] Resumed checkpoint from round {start_round - 1}")
+        print(f"[Trainer {active_arch.upper()}] Resumed checkpoint from round {start_round - 1}")
+    elif active_arch == "v4" and args.init_v3_backbone:
+        bb_path = Path(args.init_v3_backbone)
+        if not bb_path.is_absolute():
+            bb_path = PROJECT_ROOT / bb_path
+        if bb_path.exists():
+            bb_ckpt = torch.load(bb_path, map_location="cpu", weights_only=True)
+            load_backbone_from_v3_state(model, bb_ckpt["model"])
+            print(f"[Trainer V4] Warm-started backbone from {bb_path}")
 
     pretrain_paths: List[Path] = []
     for item in args.pretrain_buffer:
@@ -455,9 +512,14 @@ def main() -> None:
         print("[Pretrain V3] Resumed from checkpoint -> skip pretraining (use --force-pretrain to override)")
         pretrain_paths = []
 
+    arch_desc = (
+        f"GPN2-3ch(3x{args.dim}->{args.v_h1}->{args.v_h2})+P"
+        if active_arch == "v4"
+        else f"GPN1-22143x{args.dim}->V({args.v_hidden})+P"
+    )
     print(
-        f"[Trainer V3] Device={device}, C_lib={lib_path}, "
-        f"Arch=22143x{args.dim}->V({args.v_hidden})+P, Batch={args.batch_size}"
+        f"[Trainer {active_arch.upper()}] Device={device}, C_lib={lib_path}, "
+        f"Arch={arch_desc}, Batch={args.batch_size}, Rounds={'INF' if args.rounds <= 0 else args.rounds}"
     )
 
     if pretrain_paths:
@@ -483,7 +545,7 @@ def main() -> None:
         )
         export_pnnue_bin(model, champ_bin)
         export_pnnue_bin(model, prod_bin)
-        torch.save({"model": model.state_dict(), "round": start_round - 1}, ckpt_path)
+        torch.save({"model": model.state_dict(), "round": start_round - 1, "arch": active_arch}, ckpt_path)
         diffs = verify_pnnue_parity(lib_path, model, champ_bin)
         print(
             f"[Pretrain V3] {len(merged['boards'])} positions, {pre_epochs} epochs in "
@@ -497,7 +559,8 @@ def main() -> None:
     if not prod_bin.exists():
         export_pnnue_bin(model, prod_bin)
 
-    for rnd in range(start_round, start_round + args.rounds):
+    rnd = start_round
+    while args.rounds <= 0 or rnd < start_round + args.rounds:
         r_t0 = time.time()
         print(f"\n================ V3 Round {rnd} ================")
 
@@ -519,6 +582,25 @@ def main() -> None:
         print(f"[SelfPlay V3] {args.games_per_round} games -> {new_pos} pos in {gen_sec:.1f}s")
 
         merged = merge_replay_buffer(buf_path, sp_data, args.max_buffer)
+
+        v2_sparring_stats = None
+        if args.v2_sparring_games > 0 and (v2_nnue_bin.exists() or v2_cnn_bin.exists()):
+            from engine_bridge import sparring_pnnue_vs_v2
+
+            v2_sp_data, v2_sparring_stats = sparring_pnnue_vs_v2(
+                lib_path=lib_path,
+                pnnue_path=champ_bin if champ_bin.exists() else None,
+                v2_nnue_path=v2_nnue_bin if v2_nnue_bin.exists() else None,
+                v2_cnn_path=v2_cnn_bin if v2_cnn_bin.exists() else None,
+                num_games=args.v2_sparring_games,
+                workers=args.workers,
+                our_depth=args.sparring_depth,
+                vcf_depth=args.vcf_depth,
+                our_time=args.sparring_time,
+                seed=args.seed + rnd * 45197,
+            )
+            if v2_sp_data:
+                merged = merge_replay_buffer(buf_path, v2_sp_data, args.max_buffer)
 
         if args.teacher_bin and args.teacher_games > 0:
             from distill_rapfi import distill_rapfi_games
@@ -573,7 +655,7 @@ def main() -> None:
         train_sec = time.time() - t_trn
         export_pnnue_bin(cand_model, cand_bin)
         diffs = verify_pnnue_parity(lib_path, cand_model, cand_bin)
-        print(f"[Train V3] {train_sec:.1f}s | {trn_stats} | parity={diffs}")
+        print(f"[Train {active_arch.upper()}] {train_sec:.1f}s | {trn_stats} | parity={diffs}")
 
         t_ev = time.time()
         gate_champ = run_pnnue_arena_parallel(
@@ -633,7 +715,7 @@ def main() -> None:
                 model = cand_model
                 export_pnnue_bin(model, champ_bin)
                 export_pnnue_bin(model, prod_bin)
-                torch.save({"model": model.state_dict(), "round": rnd}, ckpt_path)
+                torch.save({"model": model.state_dict(), "round": rnd, "arch": active_arch}, ckpt_path)
                 vs_heur = cand_vs_heur
 
         eval_target = champ_bin
@@ -679,6 +761,7 @@ def main() -> None:
 
         record = {
             "phase": "v3_pnnue",
+            "arch": active_arch,
             "round": rnd,
             "depth": args.depth,
             "new_positions": new_pos,
@@ -699,6 +782,7 @@ def main() -> None:
             "prod_deployed": promoted,
             "vs_heuristic": vs_heur,
             "vs_v2": vs_v2,
+            "v2_sparring": v2_sparring_stats,
             "sparring": sparring_stats,
         }
         append_metrics(metrics_path, record)
@@ -706,6 +790,7 @@ def main() -> None:
             f"[Round {rnd} Done] total={total_sec:.1f}s | vs_heuristic={vs_heur['score']:.3f} | "
             + (f"vs_v2={vs_v2['score']:.3f}" if vs_v2 else "vs_v2=N/A")
         )
+        rnd += 1
 
 
 if __name__ == "__main__":

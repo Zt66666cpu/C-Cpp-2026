@@ -14,6 +14,9 @@ static const uint32_t kPow3[10] = {
 static bool g_tables_ready = false;
 static uint32_t g_lr_offset[5][5];
 static uint16_t g_raw_to_canon[PNNUE_NUM_RAW_PATTERNS];
+static uint16_t g_zero_pat[BOARD_CELLS][PNNUE_DIRS];
+
+static uint16_t encode_from_cells(const uint8_t cells[BOARD_CELLS], int row, int col, int dir);
 
 static bool read_u32_le(FILE *fp, uint32_t *out) {
     uint8_t buf[4];
@@ -64,6 +67,17 @@ void pnnue_init_tables(void) {
                     g_raw_to_canon[raw_idx] = g_raw_to_canon[mirror_raw];
                 }
                 ++raw_idx;
+            }
+        }
+    }
+
+    uint8_t zero_cells[BOARD_CELLS];
+    memset(zero_cells, 0, sizeof(zero_cells));
+    for (int r = 0; r < BOARD_SIZE; ++r) {
+        for (int c = 0; c < BOARD_SIZE; ++c) {
+            int idx = r * BOARD_SIZE + c;
+            for (int d = 0; d < PNNUE_DIRS; ++d) {
+                g_zero_pat[idx][d] = encode_from_cells(zero_cells, r, c, d);
             }
         }
     }
@@ -136,6 +150,18 @@ uint16_t pnnue_encode_cell_dir(const Board *board, int row, int col, int dir) {
     return g_raw_to_canon[g_lr_offset[L][R] + code];
 }
 
+static uint8_t compute_pool_bucket(const PnnueAcc *acc, int idx) {
+    uint8_t cell = acc->cells[idx];
+    if (cell == CELL_BLACK) return 2U;
+    if (cell == CELL_WHITE) return 3U;
+    for (int d = 0; d < PNNUE_DIRS; ++d) {
+        if (acc->pat_id[idx][d] != g_zero_pat[idx][d]) {
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
 PatternNnueModel *pnnue_load(const char *path) {
     if (!path) return NULL;
     pnnue_init_tables();
@@ -146,18 +172,35 @@ PatternNnueModel *pnnue_load(const char *path) {
     uint32_t magic = 0;
     uint32_t num_canon = 0;
     uint32_t dim = 0;
-    uint32_t v_hidden = 0;
-    if (!read_u32_le(fp, &magic) || magic != GPN1_MAGIC ||
+    uint32_t p3 = 0;
+    if (!read_u32_le(fp, &magic) ||
+        (magic != GPN1_MAGIC && magic != GPN2_MAGIC) ||
         !read_u32_le(fp, &num_canon) ||
         !read_u32_le(fp, &dim) ||
-        !read_u32_le(fp, &v_hidden)) {
+        !read_u32_le(fp, &p3)) {
         fclose(fp);
         return NULL;
     }
 
-    if (num_canon != PNNUE_NUM_CANON ||
-        dim == 0 || dim > PNNUE_MAX_DIM ||
-        v_hidden == 0 || v_hidden > PNNUE_MAX_V_HIDDEN) {
+    uint32_t version = (magic == GPN2_MAGIC) ? 2U : 1U;
+    uint32_t v_hidden = (version == 1U) ? p3 : 0U;
+    uint32_t v2_h1 = (version == 2U) ? p3 : 0U;
+    uint32_t v2_h2 = 0U;
+    if (version == 2U && !read_u32_le(fp, &v2_h2)) {
+        fclose(fp);
+        return NULL;
+    }
+
+    if (num_canon != PNNUE_NUM_CANON || dim == 0 || dim > PNNUE_MAX_DIM) {
+        fclose(fp);
+        return NULL;
+    }
+    if (version == 1U && (v_hidden == 0 || v_hidden > PNNUE_MAX_V_HIDDEN)) {
+        fclose(fp);
+        return NULL;
+    }
+    if (version == 2U && (v2_h1 == 0 || v2_h1 > PNNUE_MAX_V2_H1 ||
+                          v2_h2 == 0 || v2_h2 > PNNUE_MAX_V2_H2)) {
         fclose(fp);
         return NULL;
     }
@@ -167,9 +210,12 @@ PatternNnueModel *pnnue_load(const char *path) {
         fclose(fp);
         return NULL;
     }
+    m->version = version;
     m->num_canon = num_canon;
     m->dim = dim;
     m->v_hidden = v_hidden;
+    m->v2_h1 = v2_h1;
+    m->v2_h2 = v2_h2;
     m->emb = (float *)calloc((size_t)num_canon * (size_t)dim, sizeof(float));
     if (!m->emb) {
         free(m);
@@ -183,14 +229,34 @@ PatternNnueModel *pnnue_load(const char *path) {
            && read_float_array(fp, m->policy_w[1], dim)
            && read_float_array(fp, m->policy_b, 2);
 
-    for (uint32_t j = 0; ok && j < v_hidden; ++j) {
-        ok = read_float_array(fp, m->val_w1[j], dim);
-    }
-    if (ok) {
-        ok = read_float_array(fp, m->val_b1[0], v_hidden)
-          && read_float_array(fp, m->val_b1[1], v_hidden)
-          && read_float_array(fp, m->val_w2, v_hidden)
-          && read_float_array(fp, m->val_b2, 2);
+    if (version == 1U) {
+        for (uint32_t j = 0; ok && j < v_hidden; ++j) {
+            ok = read_float_array(fp, m->val_w1[j], dim);
+        }
+        if (ok) {
+            ok = read_float_array(fp, m->val_b1[0], v_hidden)
+              && read_float_array(fp, m->val_b1[1], v_hidden)
+              && read_float_array(fp, m->val_w2, v_hidden)
+              && read_float_array(fp, m->val_b2, 2);
+        }
+    } else {
+        uint32_t in_dim = 3U * dim;
+        for (uint32_t j = 0; ok && j < v2_h1; ++j) {
+            ok = read_float_array(fp, m->v2_w1[j], in_dim);
+        }
+        if (ok) {
+            ok = read_float_array(fp, m->v2_b1[0], v2_h1)
+              && read_float_array(fp, m->v2_b1[1], v2_h1);
+        }
+        for (uint32_t j = 0; ok && j < v2_h2; ++j) {
+            ok = read_float_array(fp, m->v2_w2[j], v2_h1);
+        }
+        if (ok) {
+            ok = read_float_array(fp, m->v2_b2[0], v2_h2)
+              && read_float_array(fp, m->v2_b2[1], v2_h2)
+              && read_float_array(fp, m->v2_w3, v2_h2)
+              && read_float_array(fp, m->v2_b3, 2);
+        }
     }
 
     fclose(fp);
@@ -215,14 +281,36 @@ static void refresh_cell_slot(
     uint16_t new_pat
 ) {
     uint16_t old_pat = acc->pat_id[idx][dir];
-    if (old_pat == new_pat) return;
-
     uint32_t D = model->dim;
+
+    if (old_pat == new_pat) {
+        uint8_t old_b = acc->pool_bucket[idx];
+        uint8_t new_b = compute_pool_bucket(acc, idx);
+        if (old_b != new_b) {
+            const float *cfeat = acc->cell_feat[idx];
+            float *old_ps = acc->pool_sum[old_b];
+            float *new_ps = acc->pool_sum[new_b];
+            for (uint32_t k = 0; k < D; ++k) {
+                old_ps[k] -= cfeat[k];
+                new_ps[k] += cfeat[k];
+            }
+            acc->pool_bucket[idx] = new_b;
+        }
+        return;
+    }
+
+    acc->pat_id[idx][dir] = new_pat;
+    uint8_t old_b = acc->pool_bucket[idx];
+    uint8_t new_b = compute_pool_bucket(acc, idx);
+    acc->pool_bucket[idx] = new_b;
+
     const float *old_vec = &model->emb[(size_t)old_pat * D];
     const float *new_vec = &model->emb[(size_t)new_pat * D];
     float *csum = acc->cell_sum[idx];
     float *cfeat = acc->cell_feat[idx];
     float *bsum = acc->board_feat_sum;
+    float *old_ps = acc->pool_sum[old_b];
+    float *new_ps = acc->pool_sum[new_b];
     const float *cbias = model->cell_bias;
 
     for (uint32_t k = 0; k < D; ++k) {
@@ -232,8 +320,9 @@ static void refresh_cell_slot(
         float new_f = relu_f(s + cbias[k]);
         cfeat[k] = new_f;
         bsum[k] += (new_f - old_f);
+        old_ps[k] -= old_f;
+        new_ps[k] += new_f;
     }
-    acc->pat_id[idx][dir] = new_pat;
 }
 
 void pnnue_acc_init(PnnueAcc *acc, const PatternNnueModel *model, const Board *board) {
@@ -261,10 +350,14 @@ void pnnue_acc_init(PnnueAcc *acc, const PatternNnueModel *model, const Board *b
                     csum[k] += vec[k];
                 }
             }
+            uint8_t b = compute_pool_bucket(acc, idx);
+            acc->pool_bucket[idx] = b;
+            float *ps = acc->pool_sum[b];
             for (uint32_t k = 0; k < D; ++k) {
                 float f = relu_f(csum[k] + model->cell_bias[k]);
                 cfeat[k] = f;
                 acc->board_feat_sum[k] += f;
+                ps[k] += f;
             }
         }
     }
@@ -307,8 +400,44 @@ float pnnue_eval_value(
     if (!acc || !model) return 0.0f;
     int p_idx = (player == CELL_BLACK) ? 0 : 1;
     uint32_t D = model->dim;
-    uint32_t H = model->v_hidden;
 
+    if (model->version == 2U) {
+        float x[3 * PNNUE_MAX_DIM];
+        float h1[PNNUE_MAX_V2_H1];
+        const float *my_occ = acc->pool_sum[p_idx == 0 ? 2 : 3];
+        const float *opp_occ = acc->pool_sum[p_idx == 0 ? 3 : 2];
+        const float *act_emp = acc->pool_sum[1];
+        for (uint32_t k = 0; k < D; ++k) {
+            x[k] = my_occ[k] * PNNUE_OCC_SCALE;
+            x[D + k] = opp_occ[k] * PNNUE_OCC_SCALE;
+            x[2U * D + k] = act_emp[k] * PNNUE_SUM_SCALE;
+        }
+
+        uint32_t H1 = model->v2_h1;
+        uint32_t H2 = model->v2_h2;
+        uint32_t in_dim = 3U * D;
+        for (uint32_t j = 0; j < H1; ++j) {
+            const float *w1 = model->v2_w1[j];
+            float sum = model->v2_b1[p_idx][j];
+            for (uint32_t k = 0; k < in_dim; ++k) {
+                sum += x[k] * w1[k];
+            }
+            h1[j] = relu_f(sum);
+        }
+
+        float v_raw = model->v2_b3[p_idx];
+        for (uint32_t m = 0; m < H2; ++m) {
+            const float *w2 = model->v2_w2[m];
+            float sum = model->v2_b2[p_idx][m];
+            for (uint32_t j = 0; j < H1; ++j) {
+                sum += h1[j] * w2[j];
+            }
+            v_raw += relu_f(sum) * model->v2_w3[m];
+        }
+        return tanhf(v_raw);
+    }
+
+    uint32_t H = model->v_hidden;
     float v_raw = model->val_b2[p_idx];
     for (uint32_t j = 0; j < H; ++j) {
         const float *w1 = model->val_w1[j];

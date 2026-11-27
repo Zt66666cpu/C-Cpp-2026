@@ -31,6 +31,11 @@ MoveOutcome rules_apply_move(
     Cell player
 );
 
+/* 无副作用探针接口：试落子检查后保证恢复棋盘原状 */
+bool rules_is_winning_move(Board *board, int row, int col, Cell player);
+ForbiddenReason rules_check_black_forbidden(Board *board, int row, int col);
+bool rules_is_legal_move(Board *board, int row, int col, Cell player);
+
 const char *rules_forbidden_reason_name(ForbiddenReason reason);
 
 #endif

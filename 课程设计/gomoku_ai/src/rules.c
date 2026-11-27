@@ -309,6 +309,49 @@ MoveOutcome rules_apply_move(
     return outcome;
 }
 
+bool rules_is_winning_move(Board *board, int row, int col, Cell player) {
+    if ((player != CELL_BLACK && player != CELL_WHITE)
+        || !board_is_empty(board, row, col)) {
+        return false;
+    }
+
+    board->cells[row][col] = player;
+    bool wins = (player == CELL_BLACK)
+        ? has_exact_five(board, row, col, CELL_BLACK)
+        : has_run_at_least(board, row, col, CELL_WHITE, 5);
+    board->cells[row][col] = CELL_EMPTY;
+
+    return wins;
+}
+
+ForbiddenReason rules_check_black_forbidden(Board *board, int row, int col) {
+    if (!board_is_empty(board, row, col)) {
+        return FORBIDDEN_NONE;
+    }
+
+    board->cells[row][col] = CELL_BLACK;
+    ForbiddenReason reason = FORBIDDEN_NONE;
+    if (!has_exact_five(board, row, col, CELL_BLACK)) {
+        reason = detect_black_forbidden(board, row, col);
+    }
+    board->cells[row][col] = CELL_EMPTY;
+
+    return reason;
+}
+
+bool rules_is_legal_move(Board *board, int row, int col, Cell player) {
+    if ((player != CELL_BLACK && player != CELL_WHITE)
+        || !board_is_empty(board, row, col)) {
+        return false;
+    }
+
+    if (player == CELL_BLACK) {
+        return rules_check_black_forbidden(board, row, col) == FORBIDDEN_NONE;
+    }
+
+    return true;
+}
+
 const char *rules_forbidden_reason_name(ForbiddenReason reason) {
     switch (reason) {
         case FORBIDDEN_OVERLINE:

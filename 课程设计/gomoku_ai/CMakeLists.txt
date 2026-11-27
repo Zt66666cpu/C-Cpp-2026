@@ -6,14 +6,24 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
-add_executable(gomoku_ai
-    src/main.c
+set(GOMOKU_CORE_SOURCES
     src/board.c
     src/rules.c
+    src/eval.c
+    src/search.c
+)
+
+add_executable(gomoku_ai
+    src/main.c
     src/console_ui.c
+    ${GOMOKU_CORE_SOURCES}
 )
 
 target_include_directories(gomoku_ai PRIVATE include)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(gomoku_ai PRIVATE m)
+endif()
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(gomoku_ai PRIVATE -Wall -Wextra -Wpedantic)
@@ -27,12 +37,22 @@ if(BUILD_TESTING)
         src/board.c
         src/rules.c
     )
-
     target_include_directories(gomoku_tests PRIVATE include)
-
     if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(gomoku_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
-
     add_test(NAME gomoku_tests COMMAND gomoku_tests)
+
+    add_executable(gomoku_ai_tests
+        tests/test_ai.c
+        ${GOMOKU_CORE_SOURCES}
+    )
+    target_include_directories(gomoku_ai_tests PRIVATE include)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(gomoku_ai_tests PRIVATE m)
+    endif()
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(gomoku_ai_tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME gomoku_ai_tests COMMAND gomoku_ai_tests)
 endif()

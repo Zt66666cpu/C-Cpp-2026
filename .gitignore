@@ -46,3 +46,12 @@ scores.txt
 *.swp
 *.swo
 *~
+
+# Gomoku AI training artifacts
+课程设计/gomoku_ai/training/.venv/
+课程设计/gomoku_ai/training/__pycache__/
+课程设计/gomoku_ai/training/runs/
+课程设计/gomoku_ai/training/data/
+*.pyc
+*.pt
+*.npz

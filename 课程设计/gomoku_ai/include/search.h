@@ -1,0 +1,63 @@
+#ifndef GOMOKU_SEARCH_H
+#define GOMOKU_SEARCH_H
+
+#include "board.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+
+typedef struct NnueModel NnueModel;
+typedef struct CnnModel CnnModel;
+
+typedef struct {
+    double time_limit_sec;
+    int max_depth;
+    int vcf_max_depth;
+    bool use_nnue;
+    bool use_cnn;
+    float cnn_value_weight;
+    float temperature;
+    uint64_t seed;
+} SearchConfig;
+
+typedef struct {
+    int completed_depth;
+    uint64_t nodes;
+    uint64_t vcf_nodes;
+    double elapsed_sec;
+    int score;
+    bool used_vcf;
+    bool used_guardrail;
+    bool used_nnue;
+    bool used_cnn;
+} SearchStats;
+
+typedef struct {
+    Move best_move;
+    SearchStats stats;
+    bool valid;
+    float root_policy[BOARD_CELLS];
+} SearchResult;
+
+SearchConfig search_default_config(void);
+
+/* 在给定局面下为 player 寻找最佳合法着法；保证有合法着法时绝不返回非法/禁手位置 */
+SearchResult search_find_best_move(
+    Board *board,
+    Cell player,
+    Move last_move,
+    const SearchConfig *config,
+    const NnueModel *nnue,
+    const CnnModel *cnn
+);
+
+/* 收集与已有棋子邻域距离 <= radius 的全部合法候选点（若空盘则仅返回天元） */
+int search_generate_candidates(
+    Board *board,
+    Cell player,
+    int radius,
+    Move *out_moves,
+    int max_moves
+);
+
+#endif

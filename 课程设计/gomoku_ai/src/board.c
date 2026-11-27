@@ -33,6 +33,15 @@ bool board_place(Board *board, int row, int col, Cell player) {
     return true;
 }
 
+bool board_undo(Board *board, int row, int col) {
+    if (!board_is_inside(row, col) || board->cells[row][col] == CELL_EMPTY) {
+        return false;
+    }
+
+    board->cells[row][col] = CELL_EMPTY;
+    return true;
+}
+
 bool board_is_full(const Board *board) {
     for (int row = 0; row < BOARD_SIZE; ++row) {
         for (int col = 0; col < BOARD_SIZE; ++col) {
@@ -57,4 +66,14 @@ int board_stone_count(const Board *board) {
     }
 
     return count;
+}
+
+Cell board_opponent(Cell player) {
+    if (player == CELL_BLACK) {
+        return CELL_WHITE;
+    }
+    if (player == CELL_WHITE) {
+        return CELL_BLACK;
+    }
+    return CELL_EMPTY;
 }

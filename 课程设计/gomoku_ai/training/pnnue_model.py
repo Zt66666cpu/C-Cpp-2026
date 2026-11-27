@@ -187,7 +187,8 @@ class PatternNnueNet(nn.Module):
         vb1 = self.val_b1[player_idx]  # (B, H)
         vh = torch.relu(torch.matmul(board_scaled, self.val_w1.t()) + vb1)  # (B, H)
         v_raw = torch.matmul(vh, self.val_w2) + self.val_b2[player_idx]  # (B,)
-        value = torch.tanh(v_raw)
+        sign = torch.where(player_idx == 0, 1.0, -1.0).to(v_raw.dtype)
+        value = torch.tanh(v_raw) * sign
         return policy_logits, value
 
 

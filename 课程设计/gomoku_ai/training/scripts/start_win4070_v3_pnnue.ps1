@@ -10,7 +10,7 @@ param(
     [string]$Lr = "8e-4",
     [int]$Dim = 64,
     [int]$VHidden = 32,
-    [int]$MaxBuffer = 200000,
+    [int]$MaxBuffer = 160000,
     [int]$EvalGames = 64,
     [int]$EvalDepth = 5,
     [double]$EvalTime = 0.7,

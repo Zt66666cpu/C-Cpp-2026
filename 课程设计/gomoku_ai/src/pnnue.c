@@ -318,7 +318,8 @@ float pnnue_eval_value(
         }
         v_raw += relu_f(sum) * model->val_w2[j];
     }
-    return tanhf(v_raw);
+    float v = tanhf(v_raw);
+    return (p_idx == 0) ? v : -v;
 }
 
 float pnnue_eval_policy_cell(

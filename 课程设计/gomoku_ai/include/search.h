@@ -60,4 +60,17 @@ int search_generate_candidates(
     int max_moves
 );
 
+/* VCF（连续冲四必杀）搜索：若存在必胜连冲四路径，返回 true 并输出首步 */
+bool search_find_vcf(
+    Board *board,
+    Cell attacker,
+    int max_depth,
+    double time_limit_sec,
+    Move *win_move,
+    uint64_t *out_nodes
+);
+
+/* 计算当前局面的 64 位 Zobrist 哈希（供置换表与测试验证） */
+uint64_t search_compute_zobrist(const Board *board, Cell side_to_move);
+
 #endif

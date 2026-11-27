@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-已完成 **M2（搜索底座、战术护栏、32 维棋型特征估值与基础 Alpha-Beta 人机/机机对弈）**，并通过 ASan/UBSan 构建、CTest 全量测试与 AI 自对弈验证。接下来进入 **M3/M4（迭代加深、Zobrist 置换表、着法排序与 VCF 连续冲四杀棋搜索）**。
+已完成 **M3/M4（迭代加深、64 位 Zobrist 置换表、PVS/Killer/History 着法排序与 VCF 连续冲四杀棋搜索）**，并通过 Debug（ASan+UBSan）与 Release（`-O3`）全量 CTest 及 10 局自动对弈验证。接下来进入 **M5-A（纯 C11 双网推理引擎 + 共享库 + PyTorch MPS/CUDA 训练管线）**。
 
 ## 已完成
 
@@ -43,9 +43,8 @@
 
 ## 下一次会话起点
 
-1. **M3/M4**：在 `search` 模块实现迭代加深、60 秒安全时间预算、Zobrist 置换表、PVS/Killer/History 着法排序与 VCF 连续冲四杀棋搜索。
-2. **M5-A**：实现纯 C11 双网推理（`nn_model.c`）、C 共享库（`selfplay_api.c`）与 PyTorch（MPS/CUDA）多轮自博弈训练管线。
-3. **M5-B**：启动首批多轮训练与擂台评测，并进入持续优化循环。
+1. **M5-A**：实现纯 C11 双网推理（`nn_model.c`，`GNN1` NNUE-Lite + `GCV1` Policy-Value CNN）、C 共享库（`selfplay_api.c`）与 PyTorch（MPS/CUDA）多轮自博弈训练管线。
+2. **M5-B**：启动首批多轮训练与擂台评测，并进入持续优化循环。
 
 ## 已知风险
 
@@ -59,6 +58,13 @@
 - 当前双三和双四采用基础威胁枚举，尚未覆盖完整连珠的全部递归例外。
 
 ## 变更日志
+
+### 2026-11-27（M3/M4）
+
+- 为 `search` 模块增加确定性 SplitMix64 64 位 Zobrist 哈希与 131,072 槽位置换表（含必胜分数的 ply 偏移修正）。
+- 实现迭代加深时间管理（80% 预算早停阈值 + 1024 节点实时时钟检查）、PVS 零窗口重搜、双槽 Killer 着法与 History 启发式排序。
+- 实现独立 VCF（连续冲四杀棋）求解器 `search_find_vcf`，自动识别活四/双冲四与迫使黑方踩禁手点的必胜路线。
+- 在 `test_ai.c` 补充 Zobrist 一致性、三手 VCF 必胜与活三必防测试；Debug（ASan+UBSan）与 Release（`-O3`）CTest 2/2 全过，10 局 Release AI 自对弈全部正常完局（29 步黑胜，0 非法落子）。
 
 ### 2026-11-27（M2）
 

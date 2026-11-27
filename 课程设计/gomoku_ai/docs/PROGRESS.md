@@ -4,7 +4,9 @@
 
 ## 当前阶段
 
-已完成 **M5-B V2 双网扩容与 64 局消融验证 + C11 交互悔棋/棋谱保存与回归测试加固**：
+**V2 → V3 切换期**：V3 单网增量 Pattern-NNUE（`GPN1`）+ 持久置换表/LMR 搜索已完成开发与 Mac 端验证（D-011），Windows RTX 4070 上的 V2+Rapfi 持续训练进入收尾，随后切换到 V3 冷启动（V2 样本库 + Rapfi 离线蒸馏预训练）与自博弈迭代。
+
+此前已完成 **M5-B V2 双网扩容与 64 局消融验证 + C11 交互悔棋/棋谱保存与回归测试加固**：
 - V2 双网（`NNUE 32→128→64→1` + `CNN 48ch×4blocks`）在 64 局零重复 3 手开局（`depth=4`）消融赛中对纯启发式取得 **68.8% (44-20)** 得分率，相对 V2 单 NNUE 胜率 **59.4% (38-26)**，网格扫描最优融合权重 `cnn_value_weight=0.30` 达 **69.5% (44-19-1)**。
 - 纯 C11 主程序新增人机/双人悔棋（`u`/`undo`）与 `--save-record` 可复盘棋谱保存，扩充 4 项回归测试（含缺省模型降级、VCF 禁手回避、紧限时预算与跳冲四/跳活三特征验证）。
 - Windows RTX 4070 + Rapfi 外教蒸馏与持续训练已由协同会话接管推进，本会话避免重复训练并专注 C11 主体工程质量。
@@ -46,10 +48,14 @@
 
 ## 下一次会话起点
 
-1. **M5-B**：运行多轮自博弈与双网（NNUE-Lite + Policy-Value CNN）持续训练、纯 C 擂台赛门控晋级，并编写 `docs/ALGORITHM_GUIDE.md` 答辩文档。
+1. 等 Win4070 V2 当前轮结束后停止 V2，`training/scripts/pull_from_win4070.sh` 拉回备份。
+2. `sync_to_win4070.sh` 同步代码 → `build_windows.ps1`（V2/V3 一致性 + V3 冒烟）。
+3. `distill_rapfi.py --games 1000` 生成 `training/runs_v3/rapfi_distill.npz`，再用 `start_win4070_v3_pnnue.ps1` 预训练并启动 V3 自博弈（监控台 `http://127.0.0.1:8766` 的 `windows-4070/gomoku-v3-pnnue`）。
 
 ## 已知风险
 
+- V3 训练脚本未内置 `vs_rapfi` 评测（Rapfi 对弈 worker 目前只加载 V2 模型），对 Rapfi 的阶梯评测需在最终验收阶段单独补充。
+- 监控台的“vs V1 / NNUE MSE / CNN Top-1”槽位在 V3 下分别复用为 vs V2、Pattern-NNUE 价值 MSE、策略 Top-1。
 - 双三判定和递归威胁识别复杂，可能产生隐蔽错误。
 - 没有官方擂台程序，棋力比较需要自建合理基准。
 - 神经网络路线容易消耗大量时间，不应阻塞可完整对弈版本。
@@ -60,6 +66,15 @@
 - 当前双三和双四采用基础威胁枚举，尚未覆盖完整连珠的全部递归例外。
 
 ## 变更日志
+
+### 2026-11-27（V3 Pattern-NNUE 开发与 Win4070 切换准备）
+
+- 新增 `include/pnnue.h` / `src/pnnue.c`：9 格 4 方向规范棋型（`22143` 个 ID）增量累加器单网多头 Pattern-NNUE（`GPN1`），PyTorch 与 C11 前向误差 `< 1e-7`。
+- `search.c` 增加持久置换表（代际复用）与 LMR；`selfplay_api` 增加 V3 自博弈/擂台/一致性接口。
+- 新增 `training/pnnue_model.py`、`train_pnnue.py`、`distill_rapfi.py`、`rapfi_teacher.py`、`gomoku_reporter.py` 与 Win4070 同步/编译/启动脚本。
+- 修复切换前预检缺陷：V3 预训练默认路径改为 `training/data/replay_buffer.npz`；`--pretrain-buffer` 支持多个样本库合并、恢复训练时跳过重复预训练；`metrics.jsonl` 补充 `train_loss`/`lr`；`distill_rapfi.py` 修正教师策略标签函数调用参数；上报器原生支持 `v3_pnnue` 阶段；Windows 编译脚本追加 V3 一致性与冒烟测试；拉回脚本包含 `runs_v3` 冠军权重。
+- Win4070 V2+Rapfi 第 6～7 轮：GPU 训练 `71.0s` / `65.9s`（Mac 第 5 轮 `969.7s`），R7 `vs_heuristic = 67.2%`，生产门控 `53.1%` 已部署。
+- 新增写作素材 `docs/ARCHITECTURE_QA.md` 与决策 D-011。
 
 ### 2026-11-27（Phase 7 纯 C11 推理与特征扫描加速）
 

@@ -17,6 +17,10 @@ from engine_bridge import (
     run_arena_match_parallel,
     verify_c_parity,
 )
+from rapfi_teacher import (
+    eval_vs_rapfi_parallel,
+    generate_rapfi_sparring_parallel,
+)
 from models import (
     BOARD_SIZE,
     NnueNet,
@@ -113,7 +117,7 @@ def train_nnue(
     seed: int,
 ) -> Dict[str, float]:
     features = data["features"].astype(np.float32)
-    targets = (0.65 * data["outcomes"] + 0.35 * data["search_values"]).astype(np.float32)
+    targets = (0.50 * data["outcomes"] + 0.50 * data["search_values"]).astype(np.float32)
 
     if update_norm:
         mean = features.mean(axis=0)
@@ -122,13 +126,14 @@ def train_nnue(
 
     model.to(device)
     n = features.shape[0]
+    sample_weights = np.linspace(0.55, 1.45, n, dtype=np.float32)
     rng = np.random.default_rng(seed)
     perm = rng.permutation(n)
     val_n = max(1, int(n * 0.1))
     val_idx = perm[:val_n]
     trn_idx = perm[val_n:]
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=2e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=3e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
     criterion = nn.SmoothL1Loss(beta=0.2)
 
@@ -136,6 +141,8 @@ def train_nnue(
     best_state = copy.deepcopy(model.state_dict())
     best_ep = 0
     last_train_loss = 0.0
+    no_improve = 0
+    patience = 6
 
     xv = torch.from_numpy(features[val_idx]).to(device)
     yv = torch.from_numpy(targets[val_idx]).to(device)
@@ -149,9 +156,11 @@ def train_nnue(
             b_idx = trn_idx[s : s + batch_size]
             xb = torch.from_numpy(features[b_idx]).to(device)
             yb = torch.from_numpy(targets[b_idx]).to(device)
+            wb = torch.from_numpy(sample_weights[b_idx]).to(device)
 
             pred = model(xb)
-            loss = criterion(pred, yb)
+            loss_vec = F.smooth_l1_loss(pred, yb, beta=0.2, reduction="none")
+            loss = (loss_vec * wb).mean()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -164,10 +173,15 @@ def train_nnue(
         model.eval()
         with torch.no_grad():
             val_loss = float(criterion(model(xv), yv).item())
-        if val_loss < best_val_loss:
+        if val_loss < best_val_loss - 1e-6:
             best_val_loss = val_loss
             best_state = copy.deepcopy(model.state_dict())
             best_ep = ep
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                break
 
     model.load_state_dict(best_state)
     model.eval()
@@ -200,6 +214,7 @@ def train_cnn(
     v_all = (0.60 * data["outcomes"] + 0.40 * data["search_values"]).astype(np.float32)
 
     n = x_all.shape[0]
+    sample_weights = np.linspace(0.55, 1.45, n, dtype=np.float32)
     rng = np.random.default_rng(seed)
     perm = rng.permutation(n)
     val_n = max(1, int(n * 0.1))
@@ -207,15 +222,19 @@ def train_cnn(
     trn_idx = perm[val_n:]
 
     model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=2e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
     val_criterion = nn.SmoothL1Loss(beta=0.2, reduction="sum")
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     best_score_loss = float("inf")
     best_state = copy.deepcopy(model.state_dict())
     best_metrics: Dict[str, float] = {}
     last_pol_loss = 0.0
     last_val_loss = 0.0
+    no_improve = 0
+    patience = 4
 
     for ep in range(1, epochs + 1):
         model.train()
@@ -233,18 +252,27 @@ def train_cnn(
             pt = torch.from_numpy(pb).to(device)
             mt = torch.from_numpy(mb).to(device)
             vt = torch.from_numpy(v_all[b_idx]).to(device)
-
-            logits, val_pred = model(xt)
-            masked_logits = logits.masked_fill(~mt, -1e9)
-            log_probs = F.log_softmax(masked_logits, dim=-1)
-            pol_loss = -(pt * log_probs).sum(dim=-1).mean()
-            val_loss = F.smooth_l1_loss(val_pred, vt, beta=0.2)
-            loss = pol_loss + 1.5 * val_loss
+            wb = torch.from_numpy(sample_weights[b_idx]).to(device)
 
             optimizer.zero_grad()
-            loss.backward()
+            with torch.amp.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+                logits, val_pred = model(xt)
+            # 先转 FP32 再用 -1e9 掩码，防止 FP16 溢出导致 NaN
+            logits_f = logits.float()
+            val_pred_f = val_pred.float()
+            masked_logits = logits_f.masked_fill(~mt, -1e9)
+            log_probs = F.log_softmax(masked_logits, dim=-1)
+            pol_loss_vec = -(pt * log_probs).sum(dim=-1)
+            val_loss_vec = F.smooth_l1_loss(val_pred_f, vt, beta=0.2, reduction="none")
+            pol_loss = (pol_loss_vec * wb).mean()
+            val_loss = (val_loss_vec * wb).mean()
+            loss = pol_loss + 1.5 * val_loss
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), 2.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             ep_pol += float(pol_loss.item())
             ep_val += float(val_loss.item())
@@ -288,7 +316,7 @@ def train_cnn(
         vm = val_mse_sum / max(1, val_total)
         vt1 = val_top1_hits / max(1, val_total)
         comb = vp + 1.5 * vh
-        if comb < best_score_loss:
+        if comb < best_score_loss - 1e-5:
             best_score_loss = comb
             best_state = copy.deepcopy(model.state_dict())
             best_metrics = {
@@ -299,6 +327,11 @@ def train_cnn(
                 "cnn_val_top1": round(vt1, 5),
                 "cnn_best_ep": ep,
             }
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                break
 
     model.load_state_dict(best_state)
     model.cpu()
@@ -331,6 +364,12 @@ def main() -> None:
     parser.add_argument("--ckpt-name", type=str, default="checkpoint_v2.pt")
     parser.add_argument("--v1-nnue", type=str, default="training/runs/v1_nnue.bin")
     parser.add_argument("--v1-cnn", type=str, default="training/runs/v1_cnn.bin")
+    parser.add_argument("--teacher-bin", type=str, default="")
+    parser.add_argument("--teacher-games", type=int, default=0)
+    parser.add_argument("--teacher-time-ms", type=int, default=100)
+    parser.add_argument("--teacher-eval-games", type=int, default=0)
+    parser.add_argument("--teacher-eval-ms", type=int, default=80)
+    parser.add_argument("--teacher-workers", type=int, default=8)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
     args = parser.parse_args()
@@ -369,6 +408,16 @@ def main() -> None:
     prod_cnn_bin = models_dir / "cnn.bin"
     v1_nnue_bin = (project_root / args.v1_nnue) if not Path(args.v1_nnue).is_absolute() else Path(args.v1_nnue)
     v1_cnn_bin = (project_root / args.v1_cnn) if not Path(args.v1_cnn).is_absolute() else Path(args.v1_cnn)
+    teacher_bin: Optional[Path] = None
+    if args.teacher_bin.strip():
+        cand_tb = Path(args.teacher_bin.strip())
+        if not cand_tb.is_absolute():
+            cand_tb = project_root / cand_tb
+        if cand_tb.exists():
+            teacher_bin = cand_tb
+            print(f"[Trainer] Rapfi teacher enabled: {teacher_bin}")
+        else:
+            print(f"[Trainer] WARNING: teacher-bin not found: {cand_tb}")
 
     start_round = 1
     champ_nnue_state: Optional[dict] = None
@@ -413,6 +462,37 @@ def main() -> None:
             seed=302600 + rnd * 99991,
         )
         sp_sec = time.time() - t_sp
+
+        if teacher_bin is not None and args.teacher_games > 0:
+            t_tea = time.time()
+            tea_data, tea_stats = generate_rapfi_sparring_parallel(
+                lib_path=lib_path,
+                nnue_path=sp_nnue,
+                cnn_path=sp_cnn,
+                rapfi_bin=teacher_bin,
+                num_games=args.teacher_games,
+                workers=args.teacher_workers,
+                our_depth=args.depth,
+                vcf_depth=args.vcf_depth,
+                our_time=args.time_limit,
+                cnn_weight=args.cnn_weight,
+                teacher_time_ms=args.teacher_time_ms,
+                seed=602600 + rnd * 99991,
+            )
+            tea_sec = time.time() - t_tea
+            sp_sec += tea_sec
+            tea_pos = int(tea_data["outcomes"].shape[0]) if tea_data else 0
+            if tea_pos > 0:
+                new_data = {
+                    k: np.concatenate([new_data[k], tea_data[k]], axis=0)
+                    for k in new_data.keys()
+                }
+            print(
+                f"[Teacher Rapfi Sparring] {args.teacher_games} games "
+                f"(W={tea_stats.a_wins} L={tea_stats.b_wins} D={tea_stats.draws}) "
+                f"-> +{tea_pos} positions in {tea_sec:.1f}s"
+            )
+
         new_pos = int(new_data["outcomes"].shape[0])
         buf_data = append_replay_buffer(replay_path, new_data, args.max_buffer)
         total_pos = int(buf_data["outcomes"].shape[0])
@@ -467,11 +547,14 @@ def main() -> None:
         cnn_promoted = False
         nnue_gate_score = 0.0
         cnn_gate_score = 0.0
+        joint_gate_score: Optional[float] = None
+        cand_nnue_state = copy.deepcopy(nnue.state_dict())
+        cand_cnn_state = copy.deepcopy(cnn.state_dict())
 
         if champ_nnue_state is None or champ_cnn_state is None:
             # 本架构首轮初始化冠军态
-            champ_nnue_state = copy.deepcopy(nnue.state_dict())
-            champ_cnn_state = copy.deepcopy(cnn.state_dict())
+            champ_nnue_state = cand_nnue_state
+            champ_cnn_state = cand_cnn_state
             shutil.copy2(cand_nnue, champ_nnue_bin)
             shutil.copy2(cand_cnn, champ_cnn_bin)
             nnue_promoted = True
@@ -489,7 +572,7 @@ def main() -> None:
             )
             nnue_gate_score = (s_nnue.a_wins + 0.5 * s_nnue.draws) / max(1, s_nnue.a_wins + s_nnue.b_wins + s_nnue.draws)
             if s_nnue.illegal_moves == 0 and nnue_gate_score >= args.gate_thresh:
-                champ_nnue_state = copy.deepcopy(nnue.state_dict())
+                champ_nnue_state = cand_nnue_state
                 shutil.copy2(cand_nnue, champ_nnue_bin)
                 nnue_promoted = True
             else:
@@ -508,7 +591,7 @@ def main() -> None:
             )
             cnn_gate_score = (s_cnn.a_wins + 0.5 * s_cnn.draws) / max(1, s_cnn.a_wins + s_cnn.b_wins + s_cnn.draws)
             if s_cnn.illegal_moves == 0 and cnn_gate_score >= args.gate_thresh:
-                champ_cnn_state = copy.deepcopy(cnn.state_dict())
+                champ_cnn_state = cand_cnn_state
                 shutil.copy2(cand_cnn, champ_cnn_bin)
                 cnn_promoted = True
             else:
@@ -517,6 +600,29 @@ def main() -> None:
                 f"[Gate CNN ] W={s_cnn.a_wins} L={s_cnn.b_wins} D={s_cnn.draws} "
                 f"score={cnn_gate_score:.3f} -> {'PROMOTED' if cnn_promoted else 'ROLLBACK'}"
             )
+
+            # 联合门控兜底：两网独立均未晋级时测试协同对弈效果
+            if not nnue_promoted and not cnn_promoted:
+                s_joint = run_arena_match_parallel(
+                    lib_path,
+                    cand_nnue, cand_cnn, args.eval_depth, args.vcf_depth, args.eval_time, args.cnn_weight,
+                    champ_nnue_bin, champ_cnn_bin, args.eval_depth, args.vcf_depth, args.eval_time, args.cnn_weight,
+                    num_games=args.eval_games, seed=8600 + rnd * 101, workers=args.workers,
+                )
+                joint_gate_score = (s_joint.a_wins + 0.5 * s_joint.draws) / max(1, s_joint.a_wins + s_joint.b_wins + s_joint.draws)
+                if s_joint.illegal_moves == 0 and joint_gate_score >= args.gate_thresh:
+                    champ_nnue_state = cand_nnue_state
+                    champ_cnn_state = cand_cnn_state
+                    nnue.load_state_dict(champ_nnue_state)
+                    cnn.load_state_dict(champ_cnn_state)
+                    shutil.copy2(cand_nnue, champ_nnue_bin)
+                    shutil.copy2(cand_cnn, champ_cnn_bin)
+                    nnue_promoted = True
+                    cnn_promoted = True
+                print(
+                    f"[Gate Joint] W={s_joint.a_wins} L={s_joint.b_wins} D={s_joint.draws} "
+                    f"score={joint_gate_score:.3f} -> {'PROMOTED BOTH' if (nnue_promoted and cnn_promoted) else 'KEEP CHAMP'}"
+                )
 
         # 全量评测：当前活跃冠军 vs 纯启发式基线
         vs_base = run_arena_match_parallel(
@@ -547,6 +653,38 @@ def main() -> None:
             print(
                 f"[Arena vs V1 Champ ] W={v1_wins} L={v1_losses} D={v1_draws} "
                 f"score={vs_v1_score:.3f} illegal={vs_v1.illegal_moves}"
+            )
+
+        vs_rapfi_record: Optional[Dict[str, object]] = None
+        if teacher_bin is not None and args.teacher_eval_games > 0:
+            vs_rapfi = eval_vs_rapfi_parallel(
+                lib_path=lib_path,
+                nnue_path=champ_nnue_bin,
+                cnn_path=champ_cnn_bin,
+                rapfi_bin=teacher_bin,
+                num_games=args.teacher_eval_games,
+                workers=args.teacher_workers,
+                eval_depth=args.eval_depth,
+                vcf_depth=args.vcf_depth,
+                eval_time=args.eval_time,
+                cnn_weight=args.cnn_weight,
+                teacher_time_ms=args.teacher_eval_ms,
+                seed=9800 + rnd * 101,
+            )
+            rapfi_score = (vs_rapfi.a_wins + 0.5 * vs_rapfi.draws) / max(
+                1, vs_rapfi.a_wins + vs_rapfi.b_wins + vs_rapfi.draws
+            )
+            vs_rapfi_record = {
+                "wins": vs_rapfi.a_wins,
+                "losses": vs_rapfi.b_wins,
+                "draws": vs_rapfi.draws,
+                "score": round(rapfi_score, 4),
+                "illegal": vs_rapfi.illegal_moves,
+                "teacher_ms": args.teacher_eval_ms,
+            }
+            print(
+                f"[Arena vs Rapfi   ] W={vs_rapfi.a_wins} L={vs_rapfi.b_wins} D={vs_rapfi.draws} "
+                f"score={rapfi_score:.3f} (teacher={args.teacher_eval_ms}ms)"
             )
 
         # 只有不弱于当前生产模型（且首次超越 V1 或本轮有晋级）才同步更新 models/*.bin
@@ -595,6 +733,7 @@ def main() -> None:
             **cnn_metrics,
             "nnue_gate_score": round(nnue_gate_score, 4),
             "cnn_gate_score": round(cnn_gate_score, 4),
+            "joint_gate_score": round(joint_gate_score, 4) if joint_gate_score is not None else None,
             "nnue_promoted": nnue_promoted,
             "cnn_promoted": cnn_promoted,
             "prod_deployed": prod_deployed,
@@ -614,6 +753,8 @@ def main() -> None:
                 "score": round(vs_v1_score, 4),
             },
         }
+        if vs_rapfi_record is not None:
+            record["vs_rapfi"] = vs_rapfi_record
         with open(metrics_path, "a", encoding="utf-8") as fp:
             fp.write(json.dumps(record, ensure_ascii=False) + "\n")
 

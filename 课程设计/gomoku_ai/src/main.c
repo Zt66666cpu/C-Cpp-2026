@@ -1,6 +1,7 @@
 #include "board.h"
 #include "console_ui.h"
 #include "nn_model.h"
+#include "pnnue.h"
 #include "rules.h"
 #include "search.h"
 
@@ -13,6 +14,7 @@ typedef struct {
     int games;
     double time_limit;
     int max_depth;
+    const char *pnnue_path;
     const char *nnue_path;
     const char *cnn_path;
     const char *save_record_path;
@@ -37,6 +39,7 @@ static void print_usage(const char *prog) {
     printf("  --games N           Number of games for --ai-vs-ai (default: 1)\n");
     printf("  --time SEC          Search time limit per move in seconds (default: 5.0)\n");
     printf("  --depth D           Max search depth (default: 5)\n");
+    printf("  --pnnue PATH        Path to V3 Pattern-NNUE binary (default: models/pnnue.bin)\n");
     printf("  --nnue PATH         Path to NNUE-Lite model binary (default: models/nnue.bin)\n");
     printf("  --cnn PATH          Path to Policy-Value CNN binary (default: models/cnn.bin)\n");
     printf("  --save-record PATH  Save replayable move log to PATH\n");
@@ -49,6 +52,7 @@ static bool parse_cli(int argc, char **argv, CliOptions *opts) {
     opts->games = 1;
     opts->time_limit = 5.0;
     opts->max_depth = 5;
+    opts->pnnue_path = "models/pnnue.bin";
     opts->nnue_path = "models/nnue.bin";
     opts->cnn_path = "models/cnn.bin";
     opts->save_record_path = NULL;
@@ -64,6 +68,8 @@ static bool parse_cli(int argc, char **argv, CliOptions *opts) {
             opts->time_limit = atof(argv[++i]);
         } else if (strcmp(argv[i], "--depth") == 0 && i + 1 < argc) {
             opts->max_depth = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--pnnue") == 0 && i + 1 < argc) {
+            opts->pnnue_path = argv[++i];
         } else if (strcmp(argv[i], "--nnue") == 0 && i + 1 < argc) {
             opts->nnue_path = argv[++i];
         } else if (strcmp(argv[i], "--cnn") == 0 && i + 1 < argc) {
@@ -179,6 +185,7 @@ static void save_game_record(
 static int run_single_game(
     GameMode mode,
     const SearchConfig *cfg,
+    const PatternNnueModel *pnnue,
     const NnueModel *nnue,
     const CnnModel *cnn,
     const char *record_path,
@@ -207,9 +214,9 @@ static int run_single_game(
         bool ai_move = is_ai_turn(mode, current_player);
 
         if (ai_move) {
-            SearchResult res = search_find_best_move(
-                &board, current_player, last_move, cfg, nnue, cnn
-            );
+            SearchResult res = pnnue
+                ? search_find_best_move_pnnue(&board, current_player, last_move, cfg, pnnue)
+                : search_find_best_move(&board, current_player, last_move, cfg, nnue, cnn);
             if (!res.valid) {
                 fprintf(stderr, "AI could not find a legal move.\n");
                 rc = -1;
@@ -321,16 +328,24 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    PatternNnueModel *pnnue = NULL;
     NnueModel *nnue = NULL;
     CnnModel *cnn = NULL;
     if (!opts.no_nn) {
-        nnue = nnue_load(opts.nnue_path);
-        cnn = cnn_load(opts.cnn_path);
-        printf(
-            "Engine models: NNUE=%s, CNN=%s\n",
-            nnue ? opts.nnue_path : "none (linear fallback)",
-            cnn ? opts.cnn_path : "none (heuristic ordering)"
-        );
+        pnnue = pnnue_load(opts.pnnue_path);
+        if (!pnnue) {
+            nnue = nnue_load(opts.nnue_path);
+            cnn = cnn_load(opts.cnn_path);
+        }
+        if (pnnue) {
+            printf("Engine models: V3 Pattern-NNUE=%s\n", opts.pnnue_path);
+        } else {
+            printf(
+                "Engine models: NNUE=%s, CNN=%s (V3 PNNUE not loaded)\n",
+                nnue ? opts.nnue_path : "none (linear fallback)",
+                cnn ? opts.cnn_path : "none (heuristic ordering)"
+            );
+        }
     } else {
         printf("Engine models: disabled (--no-nn, linear heuristic mode)\n");
     }
@@ -338,8 +353,8 @@ int main(int argc, char **argv) {
     SearchConfig cfg = search_default_config();
     cfg.time_limit_sec = opts.time_limit;
     cfg.max_depth = opts.max_depth;
-    cfg.use_nnue = (nnue != NULL);
-    cfg.use_cnn = (cnn != NULL);
+    cfg.use_nnue = (pnnue != NULL || nnue != NULL);
+    cfg.use_cnn = (pnnue == NULL && cnn != NULL);
 
     int rc = 0;
     if (opts.ai_vs_ai) {
@@ -350,7 +365,7 @@ int main(int argc, char **argv) {
             printf("=== AI vs AI Game %d/%d ===\n", g + 1, opts.games);
             const char *rec_path = (g == opts.games - 1) ? opts.save_record_path : NULL;
             int res = run_single_game(
-                GAME_MODE_AI_VS_AI, &cfg, nnue, cnn, rec_path, opts.games > 1
+                GAME_MODE_AI_VS_AI, &cfg, pnnue, nnue, cnn, rec_path, opts.games > 1
             );
             if (res < 0) {
                 rc = 1;
@@ -374,6 +389,7 @@ int main(int argc, char **argv) {
                 break;
             }
             if (feof(stdin)) {
+                pnnue_free(pnnue);
                 nnue_free(nnue);
                 cnn_free(cnn);
                 return 0;
@@ -381,10 +397,11 @@ int main(int argc, char **argv) {
             printf("Invalid selection. Please enter 1, 2, 3, or 4.\n");
         }
         const char *rec_path = opts.save_record_path ? opts.save_record_path : "last_game.log";
-        int res = run_single_game(mode, &cfg, nnue, cnn, rec_path, false);
+        int res = run_single_game(mode, &cfg, pnnue, nnue, cnn, rec_path, false);
         rc = res < 0 ? 1 : 0;
     }
 
+    pnnue_free(pnnue);
     nnue_free(nnue);
     cnn_free(cnn);
     return rc;

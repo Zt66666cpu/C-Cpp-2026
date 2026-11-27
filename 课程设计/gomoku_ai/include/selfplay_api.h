@@ -73,6 +73,77 @@ int gomoku_eval_nn_debug(
     float *out_cnn_logits
 );
 
+/* 提取给定棋盘和执子方的禁手掩码与 32 维 NNUE 特征，返回 0 表示成功 */
+int gomoku_extract_state(
+    const uint8_t *board_cells,
+    int player,
+    uint8_t *out_forbidden,
+    float *out_features
+);
+
+/* 对给定棋盘执行一次搜索，输出最佳落点索引、归一化估值、策略分布、禁手掩码与特征 */
+int gomoku_step_search(
+    void *models_handle,
+    const uint8_t *board_cells,
+    int player,
+    int last_move_idx,
+    int max_depth,
+    int vcf_max_depth,
+    double time_limit_sec,
+    float explore_temp,
+    float cnn_value_weight,
+    uint64_t seed,
+    int *out_best_move,
+    float *out_search_value,
+    float *out_root_policy,
+    uint8_t *out_forbidden,
+    float *out_features
+);
+
+/* V3 单网 Pattern-NNUE 接口 */
+void *gomoku_load_pnnue(const char *pnnue_path);
+void gomoku_free_pnnue(void *handle);
+
+int gomoku_eval_pnnue_debug(
+    const uint8_t *board_cells,
+    int player,
+    const char *pnnue_path,
+    float *out_value,
+    float *out_policy_logits
+);
+
+int gomoku_generate_game_pnnue(
+    void *pnnue_handle,
+    int max_depth,
+    int vcf_max_depth,
+    double time_limit_sec,
+    int random_opening_plies,
+    float explore_temp,
+    uint64_t seed,
+    uint8_t *out_boards,
+    uint8_t *out_players,
+    uint8_t *out_forbidden,
+    float *out_policies,
+    float *out_values,
+    float *out_outcomes
+);
+
+int gomoku_run_match_pnnue(
+    void *pnnue_a,
+    int a_max_depth,
+    int a_vcf_depth,
+    double a_time_limit,
+    void *pnnue_b,
+    void *v2_models_b,
+    int b_max_depth,
+    int b_vcf_depth,
+    double b_time_limit,
+    float b_cnn_weight,
+    int num_games,
+    uint64_t seed,
+    MatchStats *out_stats
+);
+
 #ifdef __cplusplus
 }
 #endif

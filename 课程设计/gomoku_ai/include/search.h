@@ -8,6 +8,7 @@
 
 typedef struct NnueModel NnueModel;
 typedef struct CnnModel CnnModel;
+typedef struct PatternNnueModel PatternNnueModel;
 
 typedef struct {
     double time_limit_sec;
@@ -49,6 +50,15 @@ SearchResult search_find_best_move(
     const SearchConfig *config,
     const NnueModel *nnue,
     const CnnModel *cnn
+);
+
+/* V3 单网 Pattern-NNUE + 持久置换表 + LMR 搜索入口 */
+SearchResult search_find_best_move_pnnue(
+    Board *board,
+    Cell player,
+    Move last_move,
+    const SearchConfig *config,
+    const PatternNnueModel *pnnue
 );
 
 /* 收集与已有棋子邻域距离 <= radius 的全部合法候选点（若空盘则仅返回天元） */

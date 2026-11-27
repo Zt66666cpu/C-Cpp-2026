@@ -6,11 +6,16 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+if(WIN32)
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
 set(GOMOKU_CORE_SOURCES
     src/board.c
     src/rules.c
     src/eval.c
     src/nn_model.c
+    src/pnnue.c
     src/search.c
 )
 
@@ -43,6 +48,10 @@ endif()
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(gomoku_engine PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(MINGW)
+    target_link_options(gomoku_engine PRIVATE -static-libgcc -static)
 endif()
 
 include(CTest)

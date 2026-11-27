@@ -1,10 +1,13 @@
 #include "board.h"
 #include "eval.h"
 #include "nn_model.h"
+#include "pnnue.h"
 #include "rules.h"
 #include "search.h"
 
+#include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static int failures = 0;
 
@@ -333,6 +336,117 @@ static void test_jump_three_defense_and_cnn_smoke(void) {
     }
 }
 
+static void test_pnnue_incremental_equivalence(void) {
+    pnnue_init_tables();
+
+    PatternNnueModel *model = (PatternNnueModel *)calloc(1, sizeof(PatternNnueModel));
+    CHECK(model != NULL);
+    model->num_canon = PNNUE_NUM_CANON;
+    model->dim = 16;
+    model->v_hidden = 8;
+    model->emb = (float *)calloc((size_t)model->num_canon * model->dim, sizeof(float));
+    CHECK(model->emb != NULL);
+
+    uint32_t rng = 0x20261127U;
+    for (uint32_t p = 0; p < model->num_canon * model->dim; ++p) {
+        rng = rng * 1664525U + 1013904223U;
+        model->emb[p] = ((float)(rng & 0xFFFFU) / 65535.0f - 0.5f) * 0.25f;
+    }
+    for (uint32_t k = 0; k < model->dim; ++k) {
+        model->cell_bias[k] = (k % 2 == 0) ? -0.02f : 0.03f;
+        model->policy_w[0][k] = 0.05f * (float)(k + 1) / 16.0f;
+        model->policy_w[1][k] = -0.04f * (float)(k + 1) / 16.0f;
+    }
+    model->policy_b[0] = 0.1f;
+    model->policy_b[1] = -0.1f;
+    for (uint32_t j = 0; j < model->v_hidden; ++j) {
+        for (uint32_t k = 0; k < model->dim; ++k) {
+            model->val_w1[j][k] = (((j + k) % 3) == 0 ? 0.08f : -0.05f);
+        }
+        model->val_b1[0][j] = 0.02f;
+        model->val_b1[1][j] = -0.02f;
+        model->val_w2[j] = (j % 2 == 0) ? 0.15f : -0.12f;
+    }
+    model->val_b2[0] = 0.05f;
+    model->val_b2[1] = -0.05f;
+
+    Board board;
+    board_init(&board);
+    PnnueAcc *inc = (PnnueAcc *)calloc(1, sizeof(PnnueAcc));
+    PnnueAcc *ref = (PnnueAcc *)calloc(1, sizeof(PnnueAcc));
+    CHECK(inc != NULL && ref != NULL);
+    pnnue_acc_init(inc, model, &board);
+
+    Move history[50];
+    int n_moves = 0;
+    for (int step = 0; step < 50; ++step) {
+        Cell side = (step % 2 == 0) ? CELL_BLACK : CELL_WHITE;
+        Move m = {-1, -1};
+        for (int tries = 0; tries < 200; ++tries) {
+            rng = rng * 1664525U + 1013904223U;
+            int idx = (int)((rng >> 16) % BOARD_CELLS);
+            int r = idx / BOARD_SIZE;
+            int c = idx % BOARD_SIZE;
+            if (board_is_empty(&board, r, c)) {
+                m.row = r;
+                m.col = c;
+                break;
+            }
+        }
+        CHECK(m.row >= 0);
+        board_place(&board, m.row, m.col, side);
+        pnnue_acc_update_cell(inc, model, m.row, m.col, side);
+        history[n_moves++] = m;
+
+        pnnue_acc_init(ref, model, &board);
+        for (int i = 0; i < BOARD_CELLS; ++i) {
+            for (int d = 0; d < PNNUE_DIRS; ++d) {
+                CHECK(inc->pat_id[i][d] == ref->pat_id[i][d]);
+            }
+        }
+
+        float v_inc_b = pnnue_eval_value(inc, model, CELL_BLACK);
+        float v_ref_b = pnnue_eval_value(ref, model, CELL_BLACK);
+        float v_inc_w = pnnue_eval_value(inc, model, CELL_WHITE);
+        float v_ref_w = pnnue_eval_value(ref, model, CELL_WHITE);
+        CHECK(fabsf(v_inc_b - v_ref_b) < 1e-5f);
+        CHECK(fabsf(v_inc_w - v_ref_w) < 1e-5f);
+
+        float p_inc[BOARD_CELLS];
+        float p_ref[BOARD_CELLS];
+        pnnue_eval_policy_all(inc, model, side, p_inc);
+        pnnue_eval_policy_all(ref, model, side, p_ref);
+        for (int i = 0; i < BOARD_CELLS; ++i) {
+            CHECK(fabsf(p_inc[i] - p_ref[i]) < 1e-5f);
+        }
+    }
+
+    for (int step = n_moves - 1; step >= 0; --step) {
+        Move m = history[step];
+        pnnue_acc_update_cell(inc, model, m.row, m.col, CELL_EMPTY);
+        board_undo(&board, m.row, m.col);
+    }
+    pnnue_acc_init(ref, model, &board);
+    CHECK(fabsf(pnnue_eval_value(inc, model, CELL_BLACK) - pnnue_eval_value(ref, model, CELL_BLACK)) < 1e-5f);
+
+    /* 搜索入口必胜与必防校验 */
+    board_init(&board);
+    board.cells[7][3] = CELL_BLACK;
+    board.cells[7][4] = CELL_BLACK;
+    board.cells[7][5] = CELL_BLACK;
+    board.cells[7][6] = CELL_BLACK;
+    SearchConfig cfg = search_default_config();
+    cfg.max_depth = 3;
+    cfg.time_limit_sec = 1.0;
+    SearchResult res = search_find_best_move_pnnue(&board, CELL_BLACK, (Move){7, 6}, &cfg, model);
+    CHECK(res.valid);
+    CHECK(res.best_move.row == 7 && (res.best_move.col == 2 || res.best_move.col == 7));
+
+    free(inc);
+    free(ref);
+    pnnue_free(model);
+}
+
 int main(void) {
     test_board_undo_and_rule_probes();
     test_search_immediate_win();
@@ -348,6 +462,7 @@ int main(void) {
     test_search_respects_tight_time_budget();
     test_eval_broken_four_and_jump_three();
     test_jump_three_defense_and_cnn_smoke();
+    test_pnnue_incremental_equivalence();
 
     if (failures != 0) {
         fprintf(stderr, "%d AI test(s) failed.\n", failures);

@@ -1166,14 +1166,14 @@ def _worker_sparring_pnnue_v2(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, 
             else:
                 b_wins += 1
 
+            zero_pol = np.zeros(BOARD_CELLS, dtype=np.float32)
             for b2d_snap, p_snap, f_snap, pol_snap, sv_snap in game_records:
-                if winner != 0 and p_snap != winner:
-                    continue
-                out_val = 0.0 if winner == 0 else 1.0
+                out_val = 0.0 if winner == 0 else (1.0 if p_snap == winner else -1.0)
+                pol_use = zero_pol if (winner != 0 and p_snap != winner) else pol_snap
                 all_boards.append(b2d_snap)
                 all_players.append(np.uint8(p_snap))
                 all_forb.append(f_snap)
-                all_pol.append(pol_snap)
+                all_pol.append(pol_use)
                 all_vals.append(float(sv_snap))
                 all_out.append(float(out_val))
     finally:

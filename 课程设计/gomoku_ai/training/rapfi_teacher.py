@@ -804,9 +804,8 @@ def _worker_sparring_pnnue(
                 else:
                     b_wins += 1
 
+                zero_pol = np.zeros(BOARD_CELLS, dtype=np.float32)
                 for is_teacher, b2d_snap, p_snap, f_snap, pol_snap, sv_snap in game_records:
-                    if not is_teacher and winner != our_player:
-                        continue
                     out_val = (
                         0.0 if winner == 0 else (1.0 if p_snap == winner else -1.0)
                     )
@@ -815,10 +814,11 @@ def _worker_sparring_pnnue(
                         if (is_teacher and sv_snap == 0.0 and winner != 0)
                         else sv_snap
                     )
+                    pol_use = zero_pol if (not is_teacher and winner != our_player) else pol_snap
                     all_boards.append(b2d_snap)
                     all_players.append(np.uint8(p_snap))
                     all_forb.append(f_snap)
-                    all_pol.append(pol_snap)
+                    all_pol.append(pol_use)
                     all_vals.append(float(sval_use))
                     all_out.append(float(out_val))
     finally:

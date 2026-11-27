@@ -55,15 +55,44 @@ def _worker_distill(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int]:
 
         for g in range(num_games):
             if g > 0:
-                teacher_b.restart_board()
-                teacher_w.restart_board()
+                for client in (teacher_b, teacher_w):
+                    client.restart_board()
+                    client._send("INFO rule 4")
+                    client._send(f"INFO timeout_turn {time_ms}")
+                    client._send("INFO thread_num 1")
 
             board = np.zeros(BOARD_CELLS, dtype=np.uint8)
             opening = _make_opening_moves(rng, lib, pair_idx=None, seed=int(base_seed + g))
+            target_plies = int(rng.integers(max(3, opening_plies - 1), opening_plies + 2))
             moves_hist: List[Tuple[int, int, int]] = []
-            for mr, mc, mp_side in opening[: max(1, opening_plies)]:
+            for mr, mc, mp_side in opening[:target_plies]:
                 board[mr * BOARD_SIZE + mc] = mp_side
                 moves_hist.append((mr, mc, mp_side))
+
+            while len(moves_hist) < target_plies:
+                cur_p = 2 if (len(moves_hist) % 2 == 1) else 1
+                forb, _ = extract_state(lib, board, cur_p)
+                legal = np.where((board == 0) & ((forb == 0) if cur_p == 1 else True))[0]
+                if legal.size == 0:
+                    break
+                near = [
+                    int(idx)
+                    for idx in legal
+                    if any(
+                        abs((idx // BOARD_SIZE) - mr) <= 2 and abs((idx % BOARD_SIZE) - mc) <= 2
+                        for mr, mc, _ in moves_hist
+                    )
+                ]
+                cand_pool = [
+                    idx
+                    for idx in (near if near else legal.tolist())
+                    if not _is_five_in_row(board, idx // BOARD_SIZE, idx % BOARD_SIZE, cur_p)
+                ]
+                pool = cand_pool if cand_pool else (near if near else legal.tolist())
+                pick = int(rng.choice(pool))
+                pr, pc = pick // BOARD_SIZE, pick % BOARD_SIZE
+                board[pick] = cur_p
+                moves_hist.append((pr, pc, cur_p))
 
             player = 2 if (len(moves_hist) % 2 == 1) else 1
             winner = 0

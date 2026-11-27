@@ -129,6 +129,8 @@ def train_pnnue_epoch_loop(
     batch_size: int,
     lr: float,
     seed: int,
+    weight_decay: float = 1e-3,
+    grad_clip: float = 1.0,
 ) -> Dict[str, float]:
     boards = data["boards"]
     players = data["players"]
@@ -152,7 +154,7 @@ def train_pnnue_epoch_loop(
     val_y_t = torch.from_numpy(val_targets[val_idx]).float().to(device)
 
     model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=2e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
     use_amp = device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
@@ -216,11 +218,16 @@ def train_pnnue_epoch_loop(
                 with torch.amp.autocast("cuda"):
                     loss, _, _, _ = _compute_losses(pat_t, pidx_t, legal_t, pol_t, val_t)
                 scaler.scale(loss).backward()
+                if grad_clip > 0.0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss, _, _, _ = _compute_losses(pat_t, pidx_t, legal_t, pol_t, val_t)
                 loss.backward()
+                if grad_clip > 0.0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
 
             ep_loss += float(loss.item())
@@ -342,6 +349,8 @@ def main() -> None:
         help="预训练样本库，可重复传入或用逗号分隔多个 .npz（如 V2 replay_buffer + Rapfi 蒸馏库）",
     )
     parser.add_argument("--pretrain-epochs", type=int, default=0, help="预训练轮数，0 表示沿用 --epochs")
+    parser.add_argument("--pretrain-lr", type=float, default=6e-4, help="预训练学习率")
+    parser.add_argument("--pretrain-only", action="store_true", help="仅完成预训练与校验导出后退出")
     parser.add_argument(
         "--force-pretrain",
         action="store_true",
@@ -356,6 +365,8 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--lr", type=float, default=8e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-3)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--dim", type=int, default=64)
     parser.add_argument("--v-hidden", type=int, default=32)
     parser.add_argument("--max-buffer", type=int, default=200000)
@@ -451,7 +462,15 @@ def main() -> None:
         t0 = time.time()
         pre_epochs = args.pretrain_epochs if args.pretrain_epochs > 0 else args.epochs
         stats = train_pnnue_epoch_loop(
-            model, merged, device, pre_epochs, args.batch_size, args.lr, args.seed
+            model,
+            merged,
+            device,
+            pre_epochs,
+            args.batch_size,
+            args.pretrain_lr,
+            args.seed,
+            weight_decay=args.weight_decay,
+            grad_clip=args.grad_clip,
         )
         export_pnnue_bin(model, champ_bin)
         export_pnnue_bin(model, prod_bin)
@@ -461,6 +480,8 @@ def main() -> None:
             f"[Pretrain V3] {len(merged['boards'])} positions, {pre_epochs} epochs in "
             f"{time.time() - t0:.1f}s | {stats} | parity={diffs}"
         )
+        if args.pretrain_only:
+            return
 
     if not champ_bin.exists():
         export_pnnue_bin(model, champ_bin)
@@ -517,6 +538,8 @@ def main() -> None:
             args.batch_size,
             args.lr,
             args.seed + rnd,
+            weight_decay=args.weight_decay,
+            grad_clip=args.grad_clip,
         )
         train_sec = time.time() - t_trn
         export_pnnue_bin(cand_model, cand_bin)

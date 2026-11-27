@@ -402,7 +402,19 @@ def main() -> None:
     if args.resume and ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         model.load_state_dict(ckpt["model"])
-        start_round = int(ckpt.get("round", 0)) + 1
+        max_logged_round = 0
+        if metrics_path.exists():
+            for ln in metrics_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                s = ln.strip()
+                if not s:
+                    continue
+                try:
+                    row = json.loads(s)
+                    if row.get("phase") == "v3_pnnue":
+                        max_logged_round = max(max_logged_round, int(row.get("round") or 0))
+                except Exception:
+                    continue
+        start_round = max(int(ckpt.get("round", 0)), max_logged_round) + 1
         resumed = True
         print(f"[Trainer V3] Resumed checkpoint from round {start_round - 1}")
 
@@ -488,7 +500,7 @@ def main() -> None:
                 games=args.teacher_games,
                 workers=min(8, args.workers),
                 time_ms=args.teacher_time_ms,
-                opening_plies=3,
+                opening_plies=4,
                 output_path=dist_tmp,
                 seed=args.seed + rnd * 31337,
             )
@@ -573,7 +585,7 @@ def main() -> None:
                 a_depth=args.eval_depth,
                 a_vcf=args.vcf_depth,
                 a_time=args.eval_time,
-                b_depth=max(4, args.eval_depth - 1),
+                b_depth=args.eval_depth,
                 b_vcf=args.vcf_depth,
                 b_time=args.eval_time,
                 b_cnn_w=0.35,

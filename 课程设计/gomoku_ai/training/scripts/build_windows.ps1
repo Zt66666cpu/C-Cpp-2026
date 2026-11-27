@@ -20,7 +20,7 @@ if (-not (Test-Path $PythonExe)) {
 }
 
 Write-Output "[Build] Configuring CMake (Ninja + MinGW Release)..."
-& cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DBUILD_TESTING=OFF
+& cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DBUILD_TESTING=OFF -DBUILD_GUI=OFF
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)" }
 
 Write-Output "[Build] Building gomoku_engine..."

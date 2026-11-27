@@ -599,6 +599,78 @@ int gomoku_eval_pnnue_debug(
     return 0;
 }
 
+int gomoku_step_search_pnnue(
+    void *pnnue_handle,
+    const uint8_t *board_cells,
+    int player,
+    int last_move_idx,
+    int max_depth,
+    int vcf_max_depth,
+    double time_limit_sec,
+    float explore_temp,
+    uint64_t seed,
+    int *out_best_move,
+    float *out_search_value,
+    float *out_root_policy,
+    uint8_t *out_forbidden
+) {
+    if (!board_cells) return -1;
+
+    Board board;
+    board_init(&board);
+    for (int r = 0; r < BOARD_SIZE; ++r) {
+        for (int c = 0; c < BOARD_SIZE; ++c) {
+            board.cells[r][c] = (Cell)board_cells[r * BOARD_SIZE + c];
+        }
+    }
+
+    Cell side = (player == CELL_WHITE) ? CELL_WHITE : CELL_BLACK;
+    Move last_move = {-1, -1};
+    if (last_move_idx >= 0 && last_move_idx < BOARD_CELLS) {
+        last_move.row = last_move_idx / BOARD_SIZE;
+        last_move.col = last_move_idx % BOARD_SIZE;
+    }
+
+    if (out_forbidden) {
+        gomoku_extract_state(board_cells, (int)side, out_forbidden, NULL);
+    }
+
+    const PatternNnueModel *pnnue = (const PatternNnueModel *)pnnue_handle;
+    SearchConfig cfg = search_default_config();
+    cfg.max_depth = max_depth > 0 ? max_depth : 3;
+    cfg.vcf_max_depth = vcf_max_depth;
+    cfg.time_limit_sec = time_limit_sec > 0.05 ? time_limit_sec : 0.5;
+    cfg.use_nnue = (pnnue != NULL);
+    cfg.use_cnn = false;
+    cfg.temperature = explore_temp;
+    cfg.seed = seed ? seed : 0x123456789ABCDEF0ULL;
+
+    SearchResult res = pnnue
+        ? search_find_best_move_pnnue(&board, side, last_move, &cfg, pnnue)
+        : search_find_best_move(&board, side, last_move, &cfg, NULL, NULL);
+    if (!res.valid) {
+        if (out_best_move) *out_best_move = -1;
+        return -2;
+    }
+
+    if (out_best_move) {
+        *out_best_move = res.best_move.row * BOARD_SIZE + res.best_move.col;
+    }
+    if (out_root_policy) {
+        memcpy(out_root_policy, res.root_policy, sizeof(float) * BOARD_CELLS);
+    }
+    if (out_search_value) {
+        if (res.stats.score >= EVAL_MATE_SCORE - 1000) {
+            *out_search_value = 1.0f;
+        } else if (res.stats.score <= -(EVAL_MATE_SCORE - 1000)) {
+            *out_search_value = -1.0f;
+        } else {
+            *out_search_value = tanhf((float)res.stats.score / 25000.0f);
+        }
+    }
+    return 0;
+}
+
 int gomoku_generate_game_pnnue(
     void *pnnue_handle,
     int max_depth,

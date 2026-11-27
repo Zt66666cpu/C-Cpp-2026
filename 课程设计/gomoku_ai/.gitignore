@@ -11,7 +11,8 @@
 *.pem
 
 # Local model files and large training artifacts
-models/
+models/*
 !models/*.bin
 checkpoints/
 training-data/
+training/runs_v3/

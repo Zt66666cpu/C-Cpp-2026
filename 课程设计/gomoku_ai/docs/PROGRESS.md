@@ -4,12 +4,10 @@
 
 ## 当前阶段
 
-**V2 → V3 切换期**：V3 单网增量 Pattern-NNUE（`GPN1`）+ 持久置换表/LMR 搜索已完成开发与 Mac 端验证（D-011），Windows RTX 4070 上的 V2+Rapfi 持续训练进入收尾，随后切换到 V3 冷启动（V2 样本库 + Rapfi 离线蒸馏预训练）与自博弈迭代。
-
-此前已完成 **M5-B V2 双网扩容与 64 局消融验证 + C11 交互悔棋/棋谱保存与回归测试加固**：
-- V2 双网（`NNUE 32→128→64→1` + `CNN 48ch×4blocks`）在 64 局零重复 3 手开局（`depth=4`）消融赛中对纯启发式取得 **68.8% (44-20)** 得分率，相对 V2 单 NNUE 胜率 **59.4% (38-26)**，网格扫描最优融合权重 `cnn_value_weight=0.30` 达 **69.5% (44-19-1)**。
-- 纯 C11 主程序新增人机/双人悔棋（`u`/`undo`）与 `--save-record` 可复盘棋谱保存，扩充 4 项回归测试（含缺省模型降级、VCF 禁手回避、紧限时预算与跳冲四/跳活三特征验证）。
-- Windows RTX 4070 + Rapfi 外教蒸馏与持续训练已由协同会话接管推进，本会话避免重复训练并专注 C11 主体工程质量。
+已完成 **V3 单网增量 Pattern-NNUE（`GPN1`）10 轮 RTX 4070 自博弈训练与阶段 5 全阶梯验收**：
+- 最终部署 `models/pnnue.bin`（`5.4 MB`，Round 4 门控晋级冠军），并在本地保留 V2+Rapfi 双网权重（`models/nnue.bin` 49 KB + `models/cnn.bin` 720 KB），`gomoku_ai` 支持 V3 优先加载、V2 备选与 `--no-nn` 纯手工启发式降级。
+- 在 Win4070 统一阶段 5 阶梯评测（共 276 局，`0` 非法落子）中，V3 在同深度 `depth=5` 下以 **59.4% (38-26)** 击败纯启发式、对 V1（`depth=4`）取得 **51.6% (33-31)**、对 V2+Rapfi（`depth=4`）取得 **57.8% (37-27)**；同深度 `depth=5` 对阵 V2+Rapfi 为 **37.5% (24-40)**，对阵职业级引擎 Rapfi 250615（`80ms`）为 **0-20**。
+- Mac 本地 Release + Debug（ASan/UBSan）CTest、`--verify-only`（误差 `< 1.2e-7`）、离线 `--ai-vs-ai` 对局及 `--no-nn` 降级均验证通过。
 
 ## 已完成
 
@@ -48,14 +46,12 @@
 
 ## 下一次会话起点
 
-1. 等 Win4070 V2 当前轮结束后停止 V2，`training/scripts/pull_from_win4070.sh` 拉回备份。
-2. `sync_to_win4070.sh` 同步代码 → `build_windows.ps1`（V2/V3 一致性 + V3 冒烟）。
-3. `distill_rapfi.py --games 1000` 生成 `training/runs_v3/rapfi_distill.npz`，再用 `start_win4070_v3_pnnue.ps1` 预训练并启动 V3 自博弈（监控台 `http://127.0.0.1:8766` 的 `windows-4070/gomoku-v3-pnnue`）。
+1. **课程最终答辩与界面确认**：确认老师要求的提交格式/输入输出接口（O-001/O-002），按需决定是否增加图形界面或继续延长 V3 训练（如调整门控阈值或混入四三组合显式特征）。
 
 ## 已知风险
 
-- V3 训练脚本未内置 `vs_rapfi` 评测（Rapfi 对弈 worker 目前只加载 V2 模型），对 Rapfi 的阶梯评测需在最终验收阶段单独补充。
-- 监控台的“vs V1 / NNUE MSE / CNN Top-1”槽位在 V3 下分别复用为 vs V2、Pattern-NNUE 价值 MSE、策略 Top-1。
+- 当前双三和双四采用基础威胁枚举，尚未覆盖完整连珠的全部递归例外；提交接口和最终演示平台编译器仍待最终确认。
+- 同深度 `depth=5` 下 V3（10 轮从头训练、无显式四三特征）仍弱于包含 32 维棋型特征与 CNN 融合的 V2+Rapfi（`24-40`），且尚不能战胜职业级引擎 Rapfi（`0-20`）。
 - 双三判定和递归威胁识别复杂，可能产生隐蔽错误。
 - 没有官方擂台程序，棋力比较需要自建合理基准。
 - 神经网络路线容易消耗大量时间，不应阻塞可完整对弈版本。
@@ -66,6 +62,18 @@
 - 当前双三和双四采用基础威胁枚举，尚未覆盖完整连珠的全部递归例外。
 
 ## 变更日志
+
+### 2026-11-27（V3 Pattern-NNUE 完整训练、关键 Bug 修复与阶段 5 验收）
+
+- **Rapfi 离线蒸馏优化**：修复 `training/distill_rapfi.py` 在 `RESTART` 后未重传 `INFO` 参数及 2~3 手开局全黑胜偏差（改为 3~5 手随机平衡开局）；在 Win4070 采样 1,000 局（`B=677, W=303, D=20`），产出 `37,438` 条外教样本（耗时 `146.3s`）。
+- **搜索与价值头关键缺陷修复**：
+  - `src/search.c` / `src/selfplay_api.c`：`generate_pnnue_moves` 融合 `logit * 1200 + eval_move_heuristic / 2`，`negamax_pnnue` 仅对低战术分点在 `depth >= 4 && i >= 6` 启用 LMR，补全 PVS 根节点 fail-low 精确窗口复核并将探索限制为前 8 步，自博弈局均步数由 `11.6` 恢复至 `28.0`，A/B 测试 `vs_heuristic(d5)` 升至 `62.5%`。
+  - `src/pnnue.c` / `training/pnnue_model.py`：发现并修复绝对色棋型编码下共享价值头对白棋回合未取反导致黑白梯度相互抵消的 Bug（`GPN1` 格式零改动），预训练 `val_mse` 由 `0.3245` 降至 `0.2934`，首轮门控由 `25.0% ROLLBACK` 跃升为 `71.9% PROMOTED`。
+- **Win4070 V3 训练轨迹（`157,438` 预训练样本 + 10 轮 `depth=6` 自博弈，`MaxBuffer=160,000`）**：
+  - R1～R4 连续晋级，`val_loss` 从 `2.4974` 持续降至 `1.8679`（R10），`val_mse` 降至 `0.1968`（R9），`val_top1` 升至 `54.61%`（R10）；Round 4 成为最终部署模型 `models/pnnue.bin`（`5.4 MB`）。
+- **阶段 5 统一阶梯评测与离线交付验证**：
+  - 新增 `gomoku_step_search_pnnue`（`selfplay_api.h/.c`、`engine_bridge.py`）；Win4070 实测 `V3(d5)` vs `纯启发式(d5)` **59.4% (38-26)**、vs `V1(d4)` **51.6% (33-31)**、vs `V2+Rapfi(d4)` **57.8% (37-27)**、vs `V2+Rapfi(d5)` **37.5% (24-40)**、`V3(d6)` vs `Rapfi(80ms)` **0-20**，全过程 `0` 非法落子。
+  - Mac 端 Release + Debug(ASan/UBSan) CTest 全过，`./cmake-build-release/gomoku_ai --ai-vs-ai` 加载 `models/pnnue.bin` 与 `--no-nn` 降级均完整完局。
 
 ### 2026-11-27（V3 Pattern-NNUE 开发与 Win4070 切换准备）
 

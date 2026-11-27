@@ -112,6 +112,22 @@ int gomoku_eval_pnnue_debug(
     float *out_policy_logits
 );
 
+int gomoku_step_search_pnnue(
+    void *pnnue_handle,
+    const uint8_t *board_cells,
+    int player,
+    int last_move_idx,
+    int max_depth,
+    int vcf_max_depth,
+    double time_limit_sec,
+    float explore_temp,
+    uint64_t seed,
+    int *out_best_move,
+    float *out_search_value,
+    float *out_root_policy,
+    uint8_t *out_forbidden
+);
+
 int gomoku_generate_game_pnnue(
     void *pnnue_handle,
     int max_depth,

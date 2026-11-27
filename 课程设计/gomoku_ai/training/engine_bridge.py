@@ -199,6 +199,24 @@ def _bind_lib(lib_path: Path) -> ctypes.CDLL:
             ctypes.POINTER(MatchStats),
         ]
         lib.gomoku_run_match_pnnue.restype = ctypes.c_int
+
+    if hasattr(lib, "gomoku_step_search_pnnue"):
+        lib.gomoku_step_search_pnnue.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint8),
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_double,
+            ctypes.c_float,
+            ctypes.c_uint64,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.POINTER(ctypes.c_uint8),
+        ]
+        lib.gomoku_step_search_pnnue.restype = ctypes.c_int
     return lib
 
 
@@ -258,6 +276,43 @@ def step_search(
     if rc != 0:
         return -1, 0.0, pol, forb, feat
     return int(best_move.value), float(sval.value), pol, forb, feat
+
+
+def step_search_pnnue(
+    lib: ctypes.CDLL,
+    pnnue_handle: ctypes.c_void_p,
+    board: np.ndarray,
+    player: int,
+    last_move: int,
+    max_depth: int,
+    vcf_depth: int,
+    time_limit: float,
+    explore_temp: float,
+    seed: int,
+) -> Tuple[int, float, np.ndarray, np.ndarray]:
+    b = np.ascontiguousarray(board, dtype=np.uint8)
+    best_move = ctypes.c_int(-1)
+    sval = ctypes.c_float(0.0)
+    pol = np.zeros(BOARD_CELLS, dtype=np.float32)
+    forb = np.zeros(BOARD_CELLS, dtype=np.uint8)
+    rc = lib.gomoku_step_search_pnnue(
+        pnnue_handle,
+        b.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+        int(player),
+        int(last_move),
+        int(max_depth),
+        int(vcf_depth),
+        float(time_limit),
+        float(explore_temp),
+        int(seed),
+        ctypes.byref(best_move),
+        ctypes.byref(sval),
+        pol.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        forb.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+    )
+    if rc != 0:
+        return -1, 0.0, pol, forb
+    return int(best_move.value), float(sval.value), pol, forb
 
 
 def _worker_generate_games(args: Tuple) -> Dict[str, np.ndarray]:

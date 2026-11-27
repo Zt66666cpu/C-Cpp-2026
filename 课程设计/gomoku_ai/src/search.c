@@ -1177,8 +1177,8 @@ static int negamax_pnnue(
             return lin_score;
         }
         float val = pnnue_eval_value(state->acc, state->pnnue, player);
-        int nn_score = (int)(val * (float)EVAL_MAX_STATIC_SCORE);
-        int blended = (nn_score * 75 + lin_score * 25) / 100;
+        int nn_score = (int)(val * 22000.0f);
+        int blended = nn_score + (lin_score / 2);
         if (blended > EVAL_MAX_STATIC_SCORE) blended = EVAL_MAX_STATIC_SCORE;
         if (blended < -EVAL_MAX_STATIC_SCORE) blended = -EVAL_MAX_STATIC_SCORE;
         return blended;

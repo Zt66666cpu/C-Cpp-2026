@@ -23,7 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define GUI_WIDTH 1120
+#define GUI_WIDTH 1140
 #define GUI_HEIGHT 800
 #define BOARD_RECT_X 24
 #define BOARD_RECT_Y 28
@@ -32,9 +32,9 @@
 #define GRID_ORIGIN_Y 68
 #define CELL_PX 46
 #define SIDEBAR_X 768
-#define SIDEBAR_Y 20
-#define SIDEBAR_W 332
-#define SIDEBAR_H 760
+#define SIDEBAR_Y 18
+#define SIDEBAR_W 352
+#define SIDEBAR_H 764
 
 typedef enum {
     GUI_MODE_HUMAN_BLACK = 0,
@@ -91,6 +91,7 @@ typedef struct {
     Board board;
     GuiMoveRecord history[BOARD_CELLS];
     int history_len;
+    int view_ply;
     Cell current_player;
     Move last_move;
     Move hint_move;
@@ -102,12 +103,13 @@ typedef struct {
     int time_idx;
     bool show_forbidden;
     bool show_numbers;
+    bool sound_enabled;
 
     bool game_over;
     MoveOutcome final_outcome;
-    char status_banner[128];
-    char last_ai_info[128];
-    char toast_msg[128];
+    char status_banner[160];
+    char last_ai_info[160];
+    char toast_msg[160];
     double toast_until;
     float black_win_prob;
 
@@ -123,6 +125,9 @@ typedef struct {
     CnnModel *cnn;
     Font ui_font;
     bool custom_font;
+    bool has_cjk;
+    bool audio_ready;
+    Sound stone_sound;
 } GuiState;
 
 static const double kTimeOptions[3] = {1.0, 3.0, 5.0};
@@ -158,6 +163,22 @@ static void gui_mutex_unlock(AiShared *s) {
 #else
     pthread_mutex_unlock(&s->mu);
 #endif
+}
+
+static const char *ui_tr(const GuiState *st, const char *zh, const char *en) {
+    return st->has_cjk ? zh : en;
+}
+
+static const char *forbidden_name_local(const GuiState *st, ForbiddenReason r) {
+    if (!st->has_cjk) {
+        return rules_forbidden_reason_name(r);
+    }
+    switch (r) {
+        case FORBIDDEN_OVERLINE:    return "长连禁手";
+        case FORBIDDEN_DOUBLE_FOUR: return "双四禁手";
+        case FORBIDDEN_DOUBLE_THREE:return "双三禁手";
+        default:                    return "无";
+    }
 }
 
 #if defined(_WIN32)
@@ -277,29 +298,132 @@ static bool resolve_model_file(const char *filename, char *out_path, size_t out_
     return false;
 }
 
+static int cmp_int_asc(const void *a, const void *b) {
+    int va = *(const int *)a;
+    int vb = *(const int *)b;
+    return (va > vb) - (va < vb);
+}
+
 static void load_best_font(GuiState *st) {
-    static const char *kFontPaths[] = {
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/System/Library/Fonts/SFNS.ttf",
-        "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    static const char *kCjkGlyphText =
+        " !\"#$%&'()*+,-./0123456789:;<=>?@"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
+        "abcdefghijklmnopqrstuvwxyz{|}~"
+        "五子棋AI工作室引擎选择单网双纯启发对局模式人机执黑自博弈搜索深度单步限时"
+        "新开一局悔提示保存棋谱禁手标记数音效关闭复盘步进上次下回合胜率思考中"
+        "准备就绪获连长四三平局已退回至第请点击交叉落非法位置导出到失败未足"
+        "光标无当前实时状态加载完成：，。（）";
+
+    static const char *kCjkFonts[] = {
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
     };
-    size_t count = sizeof(kFontPaths) / sizeof(kFontPaths[0]);
-    for (size_t i = 0; i < count; ++i) {
-        if (FileExists(kFontPaths[i])) {
-            Font f = LoadFontEx(kFontPaths[i], 28, NULL, 0);
+
+    int raw_count = 0;
+    int *raw_cps = LoadCodepoints(kCjkGlyphText, &raw_count);
+    int unique_count = 0;
+    if (raw_cps && raw_count > 0) {
+        qsort(raw_cps, (size_t)raw_count, sizeof(int), cmp_int_asc);
+        for (int i = 0; i < raw_count; ++i) {
+            if (i == 0 || raw_cps[i] != raw_cps[i - 1]) {
+                raw_cps[unique_count++] = raw_cps[i];
+            }
+        }
+    }
+
+    for (size_t i = 0; i < sizeof(kCjkFonts) / sizeof(kCjkFonts[0]); ++i) {
+        if (FileExists(kCjkFonts[i]) && unique_count > 0) {
+            Font f = LoadFontEx(kCjkFonts[i], 28, raw_cps, unique_count);
             if (f.texture.id != 0) {
                 SetTextureFilter(f.texture, TEXTURE_FILTER_BILINEAR);
                 st->ui_font = f;
                 st->custom_font = true;
+                st->has_cjk = true;
+                UnloadCodepoints(raw_cps);
+                printf("Gomoku GUI font (CJK): %s (%d glyphs)\n", kCjkFonts[i], unique_count);
                 return;
             }
         }
     }
+    if (raw_cps) {
+        UnloadCodepoints(raw_cps);
+    }
+
+    static const char *kAsciiFonts[] = {
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/arial.ttf"
+    };
+    for (size_t i = 0; i < sizeof(kAsciiFonts) / sizeof(kAsciiFonts[0]); ++i) {
+        if (FileExists(kAsciiFonts[i])) {
+            Font f = LoadFontEx(kAsciiFonts[i], 28, NULL, 0);
+            if (f.texture.id != 0) {
+                SetTextureFilter(f.texture, TEXTURE_FILTER_BILINEAR);
+                st->ui_font = f;
+                st->custom_font = true;
+                st->has_cjk = false;
+                return;
+            }
+        }
+    }
+
     st->ui_font = GetFontDefault();
     st->custom_font = false;
+    st->has_cjk = false;
+}
+
+static void init_stone_sound(GuiState *st) {
+    InitAudioDevice();
+    if (!IsAudioDeviceReady()) {
+        st->audio_ready = false;
+        return;
+    }
+
+    const unsigned int sample_rate = 44100U;
+    const unsigned int frame_count = 2866U; /* ~65ms crisp wood click */
+    int16_t *pcm = (int16_t *)calloc(frame_count, sizeof(int16_t));
+    if (!pcm) {
+        CloseAudioDevice();
+        st->audio_ready = false;
+        return;
+    }
+
+    for (unsigned int i = 0; i < frame_count; ++i) {
+        double t = (double)i / (double)sample_rate;
+        double env1 = exp(-t * 82.0);
+        double env2 = exp(-t * 210.0);
+        double click = (i < 48U) ? (1.0 - (double)i / 48.0) : 0.0;
+        double s = 0.56 * sin(2.0 * 3.14159265358979 * 760.0 * t) * env1
+                 + 0.30 * sin(2.0 * 3.14159265358979 * 1640.0 * t) * env2
+                 + 0.16 * click;
+        double scaled = s * 22000.0;
+        if (scaled > 32000.0) scaled = 32000.0;
+        if (scaled < -32000.0) scaled = -32000.0;
+        pcm[i] = (int16_t)scaled;
+    }
+
+    Wave w;
+    w.frameCount = frame_count;
+    w.sampleRate = sample_rate;
+    w.sampleSize = 16;
+    w.channels = 1;
+    w.data = pcm;
+
+    st->stone_sound = LoadSoundFromWave(w);
+    free(pcm);
+    st->audio_ready = true;
+}
+
+static void play_stone_click(const GuiState *st, float pitch) {
+    if (st->audio_ready && st->sound_enabled) {
+        SetSoundPitch(st->stone_sound, pitch);
+        PlaySound(st->stone_sound);
+    }
 }
 
 static void draw_txt(const GuiState *st, const char *text, float x, float y, float size, Color col) {
@@ -349,6 +473,7 @@ static void update_win_prob_from_score(GuiState *st, int score, Cell mover) {
 static void reset_game(GuiState *st) {
     board_init(&st->board);
     st->history_len = 0;
+    st->view_ply = -1;
     st->current_player = CELL_BLACK;
     st->last_move = (Move){-1, -1};
     st->hint_move = (Move){-1, -1};
@@ -360,8 +485,15 @@ static void reset_game(GuiState *st) {
     gui_mutex_lock(&st->shared);
     st->shared.has_result = false;
     gui_mutex_unlock(&st->shared);
-    snprintf(st->status_banner, sizeof(st->status_banner), "Black (X) to move");
-    snprintf(st->last_ai_info, sizeof(st->last_ai_info), "Ready (d=%d, %.0fs)", st->max_depth, kTimeOptions[st->time_idx]);
+    snprintf(st->status_banner, sizeof(st->status_banner), "%s", ui_tr(st, "黑方落子", "Black (X) to move"));
+    snprintf(
+        st->last_ai_info,
+        sizeof(st->last_ai_info),
+        "%s (d=%d, %.0fs)",
+        ui_tr(st, "准备就绪", "Ready"),
+        st->max_depth,
+        kTimeOptions[st->time_idx]
+    );
     refresh_forbidden_cache(st);
 }
 
@@ -375,13 +507,23 @@ static void apply_gui_move(
     Cell mover = st->current_player;
     MoveOutcome outcome = rules_apply_move(&st->board, row, col, mover);
     if (outcome.result == MOVE_INVALID) {
-        snprintf(st->toast_msg, sizeof(st->toast_msg), "Illegal move at (%d, %d)", row + 1, col + 1);
+        snprintf(
+            st->toast_msg,
+            sizeof(st->toast_msg),
+            "%s (%d, %d)",
+            ui_tr(st, "非法位置", "Illegal move"),
+            row + 1,
+            col + 1
+        );
         st->toast_until = GetTime() + 2.0;
         return;
     }
 
     st->last_move = (Move){row, col};
+    st->view_ply = -1;
     st->has_hint = false;
+    play_stone_click(st, mover == CELL_BLACK ? 0.96f : 1.06f);
+
     if (st->history_len < BOARD_CELLS) {
         GuiMoveRecord *rec = &st->history[st->history_len++];
         rec->move = st->last_move;
@@ -399,7 +541,7 @@ static void apply_gui_move(
         snprintf(
             st->last_ai_info,
             sizeof(st->last_ai_info),
-            "d=%d | %.0fms | %llu nodes%s%s",
+            "d=%d | %.0fms | %llu%s%s",
             stats->completed_depth,
             stats->elapsed_sec * 1000.0,
             (unsigned long long)stats->nodes,
@@ -413,29 +555,32 @@ static void apply_gui_move(
         st->final_outcome = outcome;
         if (outcome.result == MOVE_BLACK_WIN) {
             st->black_win_prob = 1.0f;
-            snprintf(st->status_banner, sizeof(st->status_banner), "Black (X) wins! (Five in a row)");
+            snprintf(st->status_banner, sizeof(st->status_banner), "%s", ui_tr(st, "黑方五连胜！", "Black (X) wins!"));
         } else if (outcome.result == MOVE_WHITE_WIN) {
             st->black_win_prob = 0.0f;
-            snprintf(st->status_banner, sizeof(st->status_banner), "White (O) wins! (Five in a row)");
+            snprintf(st->status_banner, sizeof(st->status_banner), "%s", ui_tr(st, "白方五连胜！", "White (O) wins!"));
         } else if (outcome.result == MOVE_BLACK_FORBIDDEN) {
             st->black_win_prob = 0.0f;
             snprintf(
                 st->status_banner,
                 sizeof(st->status_banner),
-                "White wins! Black forbidden (%s)",
-                rules_forbidden_reason_name(outcome.forbidden)
+                "%s (%s)",
+                ui_tr(st, "白胜！黑方禁手判负", "White wins! Black forbidden"),
+                forbidden_name_local(st, outcome.forbidden)
             );
         } else {
             st->black_win_prob = 0.5f;
-            snprintf(st->status_banner, sizeof(st->status_banner), "Draw (Board full)");
+            snprintf(st->status_banner, sizeof(st->status_banner), "%s", ui_tr(st, "满盘平局", "Draw (Board full)"));
         }
     } else {
         st->current_player = board_opponent(mover);
         snprintf(
             st->status_banner,
             sizeof(st->status_banner),
-            "%s to move",
-            st->current_player == CELL_BLACK ? "Black (X)" : "White (O)"
+            "%s",
+            st->current_player == CELL_BLACK
+                ? ui_tr(st, "黑方落子", "Black (X) to move")
+                : ui_tr(st, "白方落子", "White (O) to move")
         );
     }
     refresh_forbidden_cache(st);
@@ -454,7 +599,7 @@ static void perform_undo(GuiState *st) {
         }
     }
     if (st->history_len < steps || st->history_len == 0) {
-        snprintf(st->toast_msg, sizeof(st->toast_msg), "Not enough moves to undo");
+        snprintf(st->toast_msg, sizeof(st->toast_msg), "%s", ui_tr(st, "步数不足，无法悔棋", "Not enough moves to undo"));
         st->toast_until = GetTime() + 1.8;
         return;
     }
@@ -470,6 +615,7 @@ static void perform_undo(GuiState *st) {
         board_undo(&st->board, m.row, m.col);
     }
 
+    st->view_ply = -1;
     st->game_over = false;
     st->has_hint = false;
     st->final_outcome = (MoveOutcome){.result = MOVE_OK, .forbidden = FORBIDDEN_NONE};
@@ -477,12 +623,13 @@ static void perform_undo(GuiState *st) {
         ? st->history[st->history_len - 1].move
         : (Move){-1, -1};
     st->current_player = (st->history_len % 2 == 0) ? CELL_BLACK : CELL_WHITE;
+    play_stone_click(st, 0.80f);
     snprintf(
         st->status_banner,
         sizeof(st->status_banner),
-        "Undid %d move(s) - %s to move",
-        steps,
-        st->current_player == CELL_BLACK ? "Black" : "White"
+        "%s - %s",
+        ui_tr(st, "已悔棋", "Undid"),
+        st->current_player == CELL_BLACK ? ui_tr(st, "黑方落子", "Black") : ui_tr(st, "白方落子", "White")
     );
     refresh_forbidden_cache(st);
 }
@@ -491,7 +638,7 @@ static void save_gui_record(GuiState *st) {
     const char *path = "gomoku_gui_record.txt";
     FILE *fp = fopen(path, "w");
     if (!fp) {
-        snprintf(st->toast_msg, sizeof(st->toast_msg), "Failed to save %s", path);
+        snprintf(st->toast_msg, sizeof(st->toast_msg), "%s %s", ui_tr(st, "保存失败", "Failed to save"), path);
         st->toast_until = GetTime() + 2.5;
         return;
     }
@@ -518,8 +665,46 @@ static void save_gui_record(GuiState *st) {
         );
     }
     fclose(fp);
-    snprintf(st->toast_msg, sizeof(st->toast_msg), "Saved to %s", path);
+    snprintf(st->toast_msg, sizeof(st->toast_msg), "%s %s", ui_tr(st, "已导出到", "Saved to"), path);
     st->toast_until = GetTime() + 2.5;
+}
+
+static void set_view_ply(GuiState *st, int ply) {
+    if (st->history_len == 0) {
+        st->view_ply = -1;
+        return;
+    }
+    if (ply < 0) ply = 0;
+    if (ply >= st->history_len) {
+        st->view_ply = -1;
+    } else {
+        st->view_ply = ply;
+    }
+}
+
+static void build_view_board(
+    const GuiState *st,
+    Board *out_board,
+    Move *out_last_move,
+    int *out_eff_ply,
+    bool *out_scrubbing
+) {
+    if (st->view_ply < 0 || st->view_ply >= st->history_len) {
+        *out_board = st->board;
+        *out_last_move = st->last_move;
+        *out_eff_ply = st->history_len;
+        *out_scrubbing = false;
+        return;
+    }
+    board_init(out_board);
+    *out_last_move = (Move){-1, -1};
+    for (int i = 0; i < st->view_ply; ++i) {
+        const GuiMoveRecord *r = &st->history[i];
+        board_place(out_board, r->move.row, r->move.col, r->player);
+        *out_last_move = r->move;
+    }
+    *out_eff_ply = st->view_ply;
+    *out_scrubbing = true;
 }
 
 static bool ui_button(
@@ -580,7 +765,15 @@ static void draw_stone(int cx, int cy, Cell color, bool is_last, int move_num, c
     }
 }
 
-static void render_board(const GuiState *st, int hover_r, int hover_c) {
+static void render_board(
+    const GuiState *st,
+    const Board *view_board,
+    Move view_last_move,
+    int eff_ply,
+    bool scrubbing,
+    int hover_r,
+    int hover_c
+) {
     Rectangle outer = {(float)BOARD_RECT_X, (float)BOARD_RECT_Y, (float)BOARD_RECT_SIZE, (float)BOARD_RECT_SIZE};
     DrawRectangleRounded((Rectangle){outer.x + 5, outer.y + 7, outer.width, outer.height}, 0.03f, 8, (Color){0, 0, 0, 90});
     DrawRectangleRounded(outer, 0.03f, 8, (Color){220, 179, 118, 255});
@@ -611,12 +804,12 @@ static void render_board(const GuiState *st, int hover_r, int hover_c) {
 
     int move_num_map[BOARD_CELLS];
     memset(move_num_map, 0, sizeof(move_num_map));
-    for (int i = 0; i < st->history_len; ++i) {
+    for (int i = 0; i < eff_ply; ++i) {
         Move m = st->history[i].move;
         move_num_map[m.row * BOARD_SIZE + m.col] = i + 1;
     }
 
-    if (st->show_forbidden && !st->game_over && st->current_player == CELL_BLACK) {
+    if (!scrubbing && st->show_forbidden && !st->game_over && st->current_player == CELL_BLACK) {
         for (int r = 0; r < BOARD_SIZE; ++r) {
             for (int c = 0; c < BOARD_SIZE; ++c) {
                 if (st->forbidden_map[r * BOARD_SIZE + c]) {
@@ -631,25 +824,25 @@ static void render_board(const GuiState *st, int hover_r, int hover_c) {
 
     for (int r = 0; r < BOARD_SIZE; ++r) {
         for (int c = 0; c < BOARD_SIZE; ++c) {
-            Cell cell = st->board.cells[r][c];
+            Cell cell = view_board->cells[r][c];
             if (cell == CELL_EMPTY) continue;
             int cx = GRID_ORIGIN_X + c * CELL_PX;
             int cy = GRID_ORIGIN_Y + r * CELL_PX;
-            bool is_last = (r == st->last_move.row && c == st->last_move.col);
+            bool is_last = (r == view_last_move.row && c == view_last_move.col);
             draw_stone(cx, cy, cell, is_last, move_num_map[r * BOARD_SIZE + c], st);
         }
     }
 
-    if (st->has_hint && !st->game_over) {
+    if (!scrubbing && st->has_hint && !st->game_over) {
         int hx = GRID_ORIGIN_X + st->hint_move.col * CELL_PX;
         int hy = GRID_ORIGIN_Y + st->hint_move.row * CELL_PX;
         DrawRing((Vector2){(float)hx, (float)hy}, 10.0f, 15.0f, 0.0f, 360.0f, 24, (Color){36, 130, 235, 240});
         DrawCircle(hx, hy, 5.0f, (Color){36, 130, 235, 200});
     }
 
-    if (!st->game_over && !is_ai_turn_gui(st->mode, st->current_player)
+    if (!scrubbing && !st->game_over && !is_ai_turn_gui(st->mode, st->current_player)
         && hover_r >= 0 && hover_c >= 0
-        && board_is_empty(&st->board, hover_r, hover_c)) {
+        && board_is_empty(view_board, hover_r, hover_c)) {
         int cx = GRID_ORIGIN_X + hover_c * CELL_PX;
         int cy = GRID_ORIGIN_Y + hover_r * CELL_PX;
         Color ghost = (st->current_player == CELL_BLACK)
@@ -664,13 +857,15 @@ static void render_board(const GuiState *st, int hover_r, int hover_c) {
 
 int main(void) {
     SetConfigFlags(FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
-    InitWindow(GUI_WIDTH, GUI_HEIGHT, "Gomoku AI - Pattern-NNUE & Renju (15x15)");
+    InitWindow(GUI_WIDTH, GUI_HEIGHT, "Gomoku AI Studio - Pattern-NNUE & Renju (15x15)");
     SetTargetFPS(60);
 
     GuiState st;
     memset(&st, 0, sizeof(st));
+    st.view_ply = -1;
     gui_mutex_init(&st.shared);
     load_best_font(&st);
+    init_stone_sound(&st);
 
     char pnnue_path[1024] = {0};
     char nnue_path[1024] = {0};
@@ -694,10 +889,12 @@ int main(void) {
     }
 
     printf(
-        "Gomoku GUI models: V3=%s | V2-NNUE=%s | V2-CNN=%s\n",
+        "Gomoku GUI models: V3=%s | V2-NNUE=%s | V2-CNN=%s | CJK=%s | Audio=%s\n",
         st.pnnue ? pnnue_path : "(none)",
         st.nnue ? nnue_path : "(none)",
-        st.cnn ? cnn_path : "(none)"
+        st.cnn ? cnn_path : "(none)",
+        st.has_cjk ? "on" : "fallback",
+        st.audio_ready ? "on" : "off"
     );
     fflush(stdout);
 
@@ -706,6 +903,7 @@ int main(void) {
     st.time_idx = 1;
     st.show_forbidden = true;
     st.show_numbers = false;
+    st.sound_enabled = true;
     reset_game(&st);
 
     while (!WindowShouldClose()) {
@@ -735,7 +933,8 @@ int main(void) {
                 snprintf(
                     st.last_ai_info,
                     sizeof(st.last_ai_info),
-                    "Hint (%d,%d) d=%d %.0fms",
+                    "%s (%d,%d) d=%d %.0fms",
+                    ui_tr(&st, "提示", "Hint"),
                     res.best_move.row + 1,
                     res.best_move.col + 1,
                     res.stats.completed_depth,
@@ -746,8 +945,29 @@ int main(void) {
             }
         }
 
-        /* 2. Auto-trigger AI turn when idle */
-        if (!st.game_over && !ai_busy && is_ai_turn_gui(st.mode, st.current_player)) {
+        Board view_board;
+        Move view_last_move;
+        int eff_ply = 0;
+        bool scrubbing = false;
+        build_view_board(&st, &view_board, &view_last_move, &eff_ply, &scrubbing);
+
+        /* Keyboard replay shortcuts */
+        if (st.history_len > 0) {
+            if (IsKeyPressed(KEY_LEFT)) {
+                int cur = (st.view_ply < 0) ? st.history_len : st.view_ply;
+                set_view_ply(&st, cur - 1);
+            } else if (IsKeyPressed(KEY_RIGHT)) {
+                if (scrubbing) set_view_ply(&st, st.view_ply + 1);
+            } else if (IsKeyPressed(KEY_HOME)) {
+                set_view_ply(&st, 0);
+            } else if (IsKeyPressed(KEY_END)) {
+                st.view_ply = -1;
+            }
+            build_view_board(&st, &view_board, &view_last_move, &eff_ply, &scrubbing);
+        }
+
+        /* 2. Auto-trigger AI turn when idle and not scrubbing */
+        if (!scrubbing && !st.game_over && !ai_busy && is_ai_turn_gui(st.mode, st.current_player)) {
             if (spawn_ai_worker(&st, false)) {
                 ai_busy = true;
             }
@@ -764,7 +984,7 @@ int main(void) {
             hover_c = -1;
         }
 
-        if (!st.game_over && !ai_busy && !is_ai_turn_gui(st.mode, st.current_player)
+        if (!scrubbing && !st.game_over && !ai_busy && !is_ai_turn_gui(st.mode, st.current_player)
             && hover_r >= 0 && hover_c >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             if (board_is_empty(&st.board, hover_r, hover_c)) {
                 apply_gui_move(&st, hover_r, hover_c, false, NULL);
@@ -775,7 +995,7 @@ int main(void) {
         BeginDrawing();
         ClearBackground((Color){24, 28, 36, 255});
 
-        render_board(&st, hover_r, hover_c);
+        render_board(&st, &view_board, view_last_move, eff_ply, scrubbing, hover_r, hover_c);
 
         /* Sidebar panel */
         Rectangle panel = {(float)SIDEBAR_X, (float)SIDEBAR_Y, (float)SIDEBAR_W, (float)SIDEBAR_H};
@@ -784,130 +1004,173 @@ int main(void) {
 
         float x = (float)SIDEBAR_X + 16.0f;
         float w = (float)SIDEBAR_W - 32.0f;
-        float y = (float)SIDEBAR_Y + 16.0f;
+        float y = (float)SIDEBAR_Y + 14.0f;
 
-        draw_txt(&st, "Gomoku AI Studio", x, y, 22.0f, (Color){242, 245, 250, 255});
+        draw_txt(&st, ui_tr(&st, "五子棋 AI 工作室", "Gomoku AI Studio"), x, y, 22.0f, (Color){242, 245, 250, 255});
         y += 28.0f;
         const char *eng_lbl = (st.engine == ENGINE_V3_PNNUE)
-            ? "Active: V3 Pattern-NNUE (GPN1)"
-            : (st.engine == ENGINE_V2_DUAL ? "Active: V2+Rapfi Dual-Net" : "Active: Pure Heuristic");
+            ? ui_tr(&st, "当前引擎: V3 Pattern-NNUE", "Active: V3 Pattern-NNUE")
+            : (st.engine == ENGINE_V2_DUAL
+                ? ui_tr(&st, "当前引擎: V2+Rapfi 双网", "Active: V2+Rapfi Dual-Net")
+                : ui_tr(&st, "当前引擎: 纯启发式搜索", "Active: Pure Heuristic"));
         draw_txt(&st, eng_lbl, x, y, 14.0f, (Color){126, 210, 176, 255});
-        y += 26.0f;
+        y += 24.0f;
 
         /* Engine selector */
-        draw_txt(&st, "Engine", x, y, 14.0f, (Color){168, 178, 196, 255});
-        y += 20.0f;
+        draw_txt(&st, ui_tr(&st, "引擎选择", "Engine"), x, y, 14.0f, (Color){168, 178, 196, 255});
+        y += 19.0f;
         float bw3 = (w - 12.0f) / 3.0f;
         Color blue_hi = (Color){56, 118, 206, 255};
-        if (ui_button(&st, (Rectangle){x, y, bw3, 30.0f}, "V3 PNNUE", st.engine == ENGINE_V3_PNNUE, st.pnnue != NULL, blue_hi)) {
+        if (ui_button(&st, (Rectangle){x, y, bw3, 29.0f}, ui_tr(&st, "V3 单网", "V3 PNNUE"), st.engine == ENGINE_V3_PNNUE, st.pnnue != NULL, blue_hi)) {
             st.engine = ENGINE_V3_PNNUE;
         }
-        if (ui_button(&st, (Rectangle){x + bw3 + 6.0f, y, bw3, 30.0f}, "V2 Dual", st.engine == ENGINE_V2_DUAL, (st.nnue != NULL || st.cnn != NULL), blue_hi)) {
+        if (ui_button(&st, (Rectangle){x + bw3 + 6.0f, y, bw3, 29.0f}, ui_tr(&st, "V2 双网", "V2 Dual"), st.engine == ENGINE_V2_DUAL, (st.nnue != NULL || st.cnn != NULL), blue_hi)) {
             st.engine = ENGINE_V2_DUAL;
         }
-        if (ui_button(&st, (Rectangle){x + 2.0f * (bw3 + 6.0f), y, bw3, 30.0f}, "Heur", st.engine == ENGINE_HEURISTIC, true, blue_hi)) {
+        if (ui_button(&st, (Rectangle){x + 2.0f * (bw3 + 6.0f), y, bw3, 29.0f}, ui_tr(&st, "纯启发", "Heur"), st.engine == ENGINE_HEURISTIC, true, blue_hi)) {
             st.engine = ENGINE_HEURISTIC;
         }
-        y += 42.0f;
+        y += 38.0f;
 
         /* Mode selector */
-        draw_txt(&st, "Game Mode", x, y, 14.0f, (Color){168, 178, 196, 255});
-        y += 20.0f;
+        draw_txt(&st, ui_tr(&st, "对局模式", "Game Mode"), x, y, 14.0f, (Color){168, 178, 196, 255});
+        y += 19.0f;
         float bw2 = (w - 8.0f) * 0.5f;
-        if (ui_button(&st, (Rectangle){x, y, bw2, 30.0f}, "Human Black", st.mode == GUI_MODE_HUMAN_BLACK, true, blue_hi)) {
+        if (ui_button(&st, (Rectangle){x, y, bw2, 29.0f}, ui_tr(&st, "人机(执黑)", "Human Black"), st.mode == GUI_MODE_HUMAN_BLACK, true, blue_hi)) {
             st.mode = GUI_MODE_HUMAN_BLACK;
             reset_game(&st);
         }
-        if (ui_button(&st, (Rectangle){x + bw2 + 8.0f, y, bw2, 30.0f}, "Human White", st.mode == GUI_MODE_HUMAN_WHITE, true, blue_hi)) {
+        if (ui_button(&st, (Rectangle){x + bw2 + 8.0f, y, bw2, 29.0f}, ui_tr(&st, "人机(执白)", "Human White"), st.mode == GUI_MODE_HUMAN_WHITE, true, blue_hi)) {
             st.mode = GUI_MODE_HUMAN_WHITE;
             reset_game(&st);
         }
-        y += 36.0f;
-        if (ui_button(&st, (Rectangle){x, y, bw2, 30.0f}, "2 Players", st.mode == GUI_MODE_TWO_PLAYER, true, blue_hi)) {
+        y += 34.0f;
+        if (ui_button(&st, (Rectangle){x, y, bw2, 29.0f}, ui_tr(&st, "双人对弈", "2 Players"), st.mode == GUI_MODE_TWO_PLAYER, true, blue_hi)) {
             st.mode = GUI_MODE_TWO_PLAYER;
             reset_game(&st);
         }
-        if (ui_button(&st, (Rectangle){x + bw2 + 8.0f, y, bw2, 30.0f}, "AI vs AI", st.mode == GUI_MODE_AI_VS_AI, true, blue_hi)) {
+        if (ui_button(&st, (Rectangle){x + bw2 + 8.0f, y, bw2, 29.0f}, ui_tr(&st, "AI 自博弈", "AI vs AI"), st.mode == GUI_MODE_AI_VS_AI, true, blue_hi)) {
             st.mode = GUI_MODE_AI_VS_AI;
             reset_game(&st);
         }
-        y += 44.0f;
+        y += 38.0f;
 
-        /* Depth selector */
-        draw_txt(&st, "Search Depth", x, y, 14.0f, (Color){168, 178, 196, 255});
-        y += 20.0f;
+        /* Depth & Time selectors */
+        draw_txt(&st, ui_tr(&st, "搜索深度 / 单步限时", "Depth & Time Budget"), x, y, 14.0f, (Color){168, 178, 196, 255});
+        y += 19.0f;
         float bw4 = (w - 18.0f) / 4.0f;
         for (int i = 0; i < 4; ++i) {
             char dlbl[16];
             snprintf(dlbl, sizeof(dlbl), "d=%d", kDepthOptions[i]);
-            if (ui_button(&st, (Rectangle){x + (float)i * (bw4 + 6.0f), y, bw4, 28.0f}, dlbl, st.max_depth == kDepthOptions[i], true, blue_hi)) {
+            if (ui_button(&st, (Rectangle){x + (float)i * (bw4 + 6.0f), y, bw4, 27.0f}, dlbl, st.max_depth == kDepthOptions[i], true, blue_hi)) {
                 st.max_depth = kDepthOptions[i];
             }
         }
-        y += 40.0f;
-
-        /* Time limit selector */
-        draw_txt(&st, "Time Budget / Move", x, y, 14.0f, (Color){168, 178, 196, 255});
-        y += 20.0f;
+        y += 32.0f;
         for (int i = 0; i < 3; ++i) {
             char tlbl[16];
             snprintf(tlbl, sizeof(tlbl), "%.0fs", kTimeOptions[i]);
-            if (ui_button(&st, (Rectangle){x + (float)i * (bw3 + 6.0f), y, bw3, 28.0f}, tlbl, st.time_idx == i, true, blue_hi)) {
+            if (ui_button(&st, (Rectangle){x + (float)i * (bw3 + 6.0f), y, bw3, 27.0f}, tlbl, st.time_idx == i, true, blue_hi)) {
                 st.time_idx = i;
             }
         }
-        y += 44.0f;
+        y += 37.0f;
 
         /* Action buttons */
         Color green_hi = (Color){44, 138, 92, 255};
-        if (ui_button(&st, (Rectangle){x, y, bw2, 34.0f}, "New Game", false, true, green_hi)) {
+        if (ui_button(&st, (Rectangle){x, y, bw2, 31.0f}, ui_tr(&st, "新开一局", "New Game"), false, true, green_hi)) {
             reset_game(&st);
         }
-        if (ui_button(&st, (Rectangle){x + bw2 + 8.0f, y, bw2, 34.0f}, "Undo", false, st.history_len > 0, green_hi)) {
+        if (ui_button(&st, (Rectangle){x + bw2 + 8.0f, y, bw2, 31.0f}, ui_tr(&st, "悔棋", "Undo"), false, st.history_len > 0, green_hi)) {
             perform_undo(&st);
         }
-        y += 42.0f;
-        bool can_hint = !st.game_over && !ai_busy && !is_ai_turn_gui(st.mode, st.current_player);
-        if (ui_button(&st, (Rectangle){x, y, bw2, 34.0f}, "AI Hint", st.has_hint, can_hint, blue_hi)) {
+        y += 36.0f;
+        bool can_hint = !scrubbing && !st.game_over && !ai_busy && !is_ai_turn_gui(st.mode, st.current_player);
+        if (ui_button(&st, (Rectangle){x, y, bw2, 31.0f}, ui_tr(&st, "AI 提示", "AI Hint"), st.has_hint, can_hint, blue_hi)) {
             spawn_ai_worker(&st, true);
         }
-        if (ui_button(&st, (Rectangle){x + bw2 + 8.0f, y, bw2, 34.0f}, "Save Record", false, st.history_len > 0, green_hi)) {
+        if (ui_button(&st, (Rectangle){x + bw2 + 8.0f, y, bw2, 31.0f}, ui_tr(&st, "保存棋谱", "Save Record"), false, st.history_len > 0, green_hi)) {
             save_gui_record(&st);
         }
-        y += 46.0f;
+        y += 38.0f;
 
-        /* Display toggles */
+        /* Display & Audio toggles */
         Color teal_hi = (Color){42, 128, 138, 255};
-        if (ui_button(&st, (Rectangle){x, y, bw2, 28.0f}, "Forbidden X", st.show_forbidden, true, teal_hi)) {
+        if (ui_button(&st, (Rectangle){x, y, bw3, 27.0f}, ui_tr(&st, "禁手标记", "Forb X"), st.show_forbidden, true, teal_hi)) {
             st.show_forbidden = !st.show_forbidden;
         }
-        if (ui_button(&st, (Rectangle){x + bw2 + 8.0f, y, bw2, 28.0f}, "Move #", st.show_numbers, true, teal_hi)) {
+        if (ui_button(&st, (Rectangle){x + bw3 + 6.0f, y, bw3, 27.0f}, ui_tr(&st, "手数", "Move #"), st.show_numbers, true, teal_hi)) {
             st.show_numbers = !st.show_numbers;
         }
-        y += 44.0f;
+        if (ui_button(&st, (Rectangle){x + 2.0f * (bw3 + 6.0f), y, bw3, 27.0f}, st.sound_enabled ? ui_tr(&st, "音效:开", "SFX:On") : ui_tr(&st, "音效:关", "SFX:Off"), st.sound_enabled, st.audio_ready, teal_hi)) {
+            st.sound_enabled = !st.sound_enabled;
+        }
+        y += 35.0f;
+
+        /* Move-replay scrubber */
+        char rep_hdr[64];
+        if (scrubbing) {
+            snprintf(rep_hdr, sizeof(rep_hdr), "%s: %d / %d", ui_tr(&st, "复盘步进", "Replay"), eff_ply, st.history_len);
+        } else {
+            snprintf(rep_hdr, sizeof(rep_hdr), "%s (%d)", ui_tr(&st, "复盘步进", "Replay"), st.history_len);
+        }
+        draw_txt(&st, rep_hdr, x, y, 13.0f, scrubbing ? (Color){250, 206, 92, 255} : (Color){168, 178, 196, 255});
+        y += 17.0f;
+        bool has_hist = st.history_len > 0;
+        if (ui_button(&st, (Rectangle){x, y, bw4, 27.0f}, "|<", false, has_hist && eff_ply > 0, blue_hi)) {
+            set_view_ply(&st, 0);
+        }
+        if (ui_button(&st, (Rectangle){x + bw4 + 6.0f, y, bw4, 27.0f}, "<", false, has_hist && eff_ply > 0, blue_hi)) {
+            set_view_ply(&st, eff_ply - 1);
+        }
+        if (ui_button(&st, (Rectangle){x + 2.0f * (bw4 + 6.0f), y, bw4, 27.0f}, ">", false, scrubbing, blue_hi)) {
+            set_view_ply(&st, eff_ply + 1);
+        }
+        if (ui_button(&st, (Rectangle){x + 3.0f * (bw4 + 6.0f), y, bw4, 27.0f}, ">|", scrubbing, scrubbing, blue_hi)) {
+            st.view_ply = -1;
+        }
+        y += 36.0f;
 
         /* Telemetry card */
-        Rectangle card = {x, y, w, 198.0f};
+        Rectangle card = {x, y, w, (float)(SIDEBAR_Y + SIDEBAR_H) - y - 14.0f};
         DrawRectangleRounded(card, 0.08f, 6, (Color){24, 28, 36, 255});
         DrawRectangleLinesEx(card, 1.0f, (Color){64, 72, 88, 255});
 
-        float cy = y + 12.0f;
-        Color status_col = st.game_over ? (Color){250, 206, 92, 255} : (Color){228, 234, 244, 255};
-        draw_txt(&st, st.status_banner, x + 12.0f, cy, 16.0f, status_col);
-        cy += 26.0f;
+        float cy = y + 10.0f;
+        const char *banner_txt = scrubbing
+            ? ui_tr(&st, "复盘模式（点击 >| 恢复）", "Replay Mode (click >|)")
+            : st.status_banner;
+        Color status_col = (st.game_over || scrubbing) ? (Color){250, 206, 92, 255} : (Color){228, 234, 244, 255};
+        draw_txt(&st, banner_txt, x + 12.0f, cy, 16.0f, status_col);
+        cy += 24.0f;
 
         char ply_line[64];
         if (ai_busy) {
-            snprintf(ply_line, sizeof(ply_line), "AI Thinking... %.1fs (Ply %d)", GetTime() - st.think_start_sec, st.history_len);
+            snprintf(
+                ply_line,
+                sizeof(ply_line),
+                "%s %.1fs (%d/%d)",
+                ui_tr(&st, "AI 思考中...", "AI Thinking..."),
+                GetTime() - st.think_start_sec,
+                st.history_len,
+                BOARD_CELLS
+            );
         } else {
-            snprintf(ply_line, sizeof(ply_line), "Ply: %d / %d", st.history_len, BOARD_CELLS);
+            snprintf(ply_line, sizeof(ply_line), "%s: %d / %d", ui_tr(&st, "当前手数", "Ply"), eff_ply, BOARD_CELLS);
         }
         draw_txt(&st, ply_line, x + 12.0f, cy, 14.0f, ai_busy ? (Color){120, 196, 255, 255} : (Color){172, 182, 200, 255});
-        cy += 26.0f;
+        cy += 24.0f;
 
         /* Win-rate bar */
         char wr_lbl[64];
-        snprintf(wr_lbl, sizeof(wr_lbl), "Win Prob  B %.0f%%  /  W %.0f%%", st.black_win_prob * 100.0f, (1.0f - st.black_win_prob) * 100.0f);
+        snprintf(
+            wr_lbl,
+            sizeof(wr_lbl),
+            "%s  %.0f%% / %.0f%%",
+            ui_tr(&st, "黑方胜率", "Win Prob B/W"),
+            st.black_win_prob * 100.0f,
+            (1.0f - st.black_win_prob) * 100.0f
+        );
         draw_txt(&st, wr_lbl, x + 12.0f, cy, 13.0f, (Color){184, 192, 208, 255});
         cy += 18.0f;
         float bar_w = w - 24.0f;
@@ -917,44 +1180,46 @@ int main(void) {
             DrawRectangleRounded((Rectangle){x + 12.0f, cy, bw_fill, 12.0f}, 0.5f, 4, (Color){44, 48, 56, 255});
         }
         DrawRectangleLinesEx((Rectangle){x + 12.0f, cy, bar_w, 12.0f}, 1.0f, (Color){92, 100, 118, 255});
-        cy += 24.0f;
+        cy += 22.0f;
 
         draw_txt(&st, st.last_ai_info, x + 12.0f, cy, 13.0f, (Color){144, 202, 168, 255});
-        cy += 24.0f;
+        cy += 22.0f;
 
-        if (hover_r >= 0 && hover_c >= 0) {
-            char coord_buf[64];
-            if (!st.game_over && st.current_player == CELL_BLACK && st.forbidden_map[hover_r * BOARD_SIZE + hover_c]) {
+        if (GetTime() < st.toast_until) {
+            draw_txt(&st, st.toast_msg, x + 12.0f, cy, 13.0f, (Color){126, 224, 168, 255});
+        } else if (hover_r >= 0 && hover_c >= 0) {
+            char coord_buf[96];
+            if (!scrubbing && !st.game_over && st.current_player == CELL_BLACK && st.forbidden_map[hover_r * BOARD_SIZE + hover_c]) {
                 snprintf(
                     coord_buf,
                     sizeof(coord_buf),
-                    "Cursor: (%d, %d) FORBIDDEN (%s)",
+                    "%s: (%d, %d) %s",
+                    ui_tr(&st, "光标", "Cursor"),
                     hover_r + 1,
                     hover_c + 1,
-                    rules_forbidden_reason_name(st.forbidden_reasons[hover_r * BOARD_SIZE + hover_c])
+                    forbidden_name_local(&st, st.forbidden_reasons[hover_r * BOARD_SIZE + hover_c])
                 );
                 draw_txt(&st, coord_buf, x + 12.0f, cy, 13.0f, (Color){236, 98, 98, 255});
             } else {
-                snprintf(coord_buf, sizeof(coord_buf), "Cursor: (%d, %d)", hover_r + 1, hover_c + 1);
+                snprintf(coord_buf, sizeof(coord_buf), "%s: (%d, %d)", ui_tr(&st, "光标", "Cursor"), hover_r + 1, hover_c + 1);
                 draw_txt(&st, coord_buf, x + 12.0f, cy, 13.0f, (Color){156, 166, 184, 255});
             }
         } else {
-            draw_txt(&st, "Click intersection to place stone", x + 12.0f, cy, 13.0f, (Color){132, 142, 160, 255});
-        }
-
-        if (GetTime() < st.toast_until) {
-            draw_txt(&st, st.toast_msg, x + 12.0f, y + 206.0f, 14.0f, (Color){126, 224, 168, 255});
+            draw_txt(&st, ui_tr(&st, "请点击交叉点落子", "Click intersection to place stone"), x + 12.0f, cy, 13.0f, (Color){132, 142, 160, 255});
         }
 
         EndDrawing();
     }
 
+    if (st.audio_ready) {
+        UnloadSound(st.stone_sound);
+        CloseAudioDevice();
+    }
     if (st.custom_font) {
         UnloadFont(st.ui_font);
     }
     CloseWindow();
 
-    /* Let background search finish before freeing models */
     for (;;) {
         gui_mutex_lock(&st.shared);
         bool busy = st.shared.busy;

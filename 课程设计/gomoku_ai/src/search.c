@@ -1172,8 +1172,16 @@ static int negamax_pnnue(
     }
 
     if (depth <= 0) {
+        int lin_score = eval_position(board, player);
+        if (lin_score >= MATE_BOUND || lin_score <= -MATE_BOUND) {
+            return lin_score;
+        }
         float val = pnnue_eval_value(state->acc, state->pnnue, player);
-        return (int)(val * 25000.0f);
+        int nn_score = (int)(val * (float)EVAL_MAX_STATIC_SCORE);
+        int blended = (nn_score * 75 + lin_score * 25) / 100;
+        if (blended > EVAL_MAX_STATIC_SCORE) blended = EVAL_MAX_STATIC_SCORE;
+        if (blended < -EVAL_MAX_STATIC_SCORE) blended = -EVAL_MAX_STATIC_SCORE;
+        return blended;
     }
 
     Move candidates[24];

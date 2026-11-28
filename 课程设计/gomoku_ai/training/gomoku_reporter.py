@@ -211,6 +211,7 @@ def _build_payload(
     runs_dir = project_dir / "training" / "runs"
     data_dir = project_dir / "training" / "data"
     v3_dir = project_dir / "training" / "runs_v3"
+    freestyle_dir = project_dir / "training" / "runs_freestyle"
     metrics_path = runs_dir / "metrics.jsonl"
     v3 = _is_v3(phase)
     raw_rows = _read_jsonl(metrics_path, phase)
@@ -220,14 +221,14 @@ def _build_payload(
 
     rows: list[dict[str, Any]] = []
     cum_sec = 0.0
-    for raw in raw_rows:
+    for idx, raw in enumerate(raw_rows):
         rnd = int(raw.get("round") or 1)
         cum_sec += float(raw.get("total_sec") or 0.0)
         if v3:
             # V3 单网：val_mse/val_top1 复用监控台 “NNUE MSE / Top-1” 槽位，vs_v2 复用 “vs V1” 槽位
             rows.append(
                 {
-                    "iter": rnd,
+                    "iter": (idx + 1) if phase == "v3_dual" else rnd,
                     "round": rnd,
                     "phase": str(raw.get("phase") or phase),
                     "rule": str(raw.get("rule") or ("freestyle" if raw.get("phase") == "v3_freestyle" else "renju")),
@@ -349,24 +350,40 @@ def _build_payload(
 
     if proc is not None and completed_rounds < max_rounds:
         next_round = (rows[-1]["round"] + 1) if rows else 1
+        active_rule_tag = ""
+        if v3:
+            for ln in reversed(log_tail):
+                m_rnd = re.search(r"V3(?:/V4)?(?:\s+\[(RENJU|FREESTYLE)\])?\s+Round\s+(\d+)", ln)
+                if m_rnd:
+                    if m_rnd.group(1):
+                        active_rule_tag = "无禁手" if m_rnd.group(1) == "FREESTYLE" else "有禁手"
+                    next_round = int(m_rnd.group(2))
+                    break
         current_round = next_round
         if v3:
-            champ_pt = v3_dir / "pnnue_champ.pt"
-            champ_ts = champ_pt.stat().st_mtime if champ_pt.exists() else 0.0
+            if phase == "v3_dual":
+                watch_dirs = [v3_dir, freestyle_dir]
+            elif phase == "v3_freestyle":
+                watch_dirs = [freestyle_dir]
+            else:
+                watch_dirs = [v3_dir]
+            champ_ts = max(((d / "pnnue_champ.pt").stat().st_mtime for d in watch_dirs if (d / "pnnue_champ.pt").exists()), default=0.0)
             base_ts = metrics_mtime if rows else 0.0
             last_round_ts = max(base_ts, champ_ts) or max(0.0, now - float(proc["elapsed_seconds"]))
-            buf_path = v3_dir / "pnnue_buffer.npz"
-            cand_paths = [v3_dir / "pnnue_cand.bin"]
+            buf_ts = max(((d / "pnnue_buffer.npz").stat().st_mtime for d in watch_dirs if (d / "pnnue_buffer.npz").exists()), default=0.0)
+            cand_ts = max(((d / "pnnue_cand.bin").stat().st_mtime for d in watch_dirs if (d / "pnnue_cand.bin").exists()), default=0.0)
+            rule_prefix = f"[{active_rule_tag}] " if active_rule_tag else ""
             train_label = "CUDA 训练中"
-            train_detail = f"第 {next_round} 轮 · Pattern-NNUE 单网训练（RTX 4070 CUDA）"
+            train_detail = f"{rule_prefix}第 {next_round} 轮 · Pattern-NNUE 单网训练（RTX 4070 CUDA）"
         else:
             last_round_ts = metrics_mtime if rows else max(0.0, now - float(proc["elapsed_seconds"]))
             buf_path = data_dir / "replay_buffer.npz"
             cand_paths = [runs_dir / f"cand_cnn_r{next_round}.bin", runs_dir / f"cand_nnue_r{next_round}.bin"]
+            buf_ts = buf_path.stat().st_mtime if buf_path.exists() else 0.0
+            cand_ts = next((p.stat().st_mtime for p in cand_paths if p.exists()), 0.0)
+            rule_prefix = ""
             train_label = "CUDA 训练中"
             train_detail = f"第 {next_round} 轮 · NNUE + CNN 神经网络训练（RTX 4070 CUDA）"
-        buf_ts = buf_path.stat().st_mtime if buf_path.exists() else 0.0
-        cand_ts = next((p.stat().st_mtime for p in cand_paths if p.exists()), 0.0)
         w_disp = worker_count or int(cli.get("workers") or 16)
         if in_pretrain:
             stage = "train"
@@ -378,7 +395,7 @@ def _build_payload(
         elif cand_ts > last_round_ts + 1.0:
             stage = "eval"
             stage_label = "评测门控中"
-            stage_detail = f"第 {next_round} 轮 · 对弈评测与门控筛选（{w_disp} workers）"
+            stage_detail = f"{rule_prefix}第 {next_round} 轮 · 对弈评测与门控筛选（{w_disp} workers）"
             stage_elapsed_s = max(0.0, now - cand_ts)
             intra_raw = (est_sp + est_tr + stage_elapsed_s) / est_round
             rem_cur = max(5.0, est_ev - stage_elapsed_s)
@@ -392,7 +409,7 @@ def _build_payload(
         else:
             stage = "selfplay"
             stage_label = "自博弈中"
-            stage_detail = f"第 {next_round} 轮 · C 引擎自博弈生成局面（{w_disp} workers）"
+            stage_detail = f"{rule_prefix}第 {next_round} 轮 · C 引擎自博弈生成局面（{w_disp} workers）"
             stage_elapsed_s = max(0.0, now - last_round_ts)
             intra_raw = stage_elapsed_s / est_round
             rem_cur = max(15.0, est_sp - stage_elapsed_s) + est_tr + est_ev

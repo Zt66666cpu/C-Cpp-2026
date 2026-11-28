@@ -700,13 +700,20 @@ def _worker_sparring_pnnue(
     a_moves = 0
     b_moves = 0
 
+    def _open_rapfi() -> RapfiClient:
+        cli = RapfiClient(Path(rapfi_bin_str))
+        cli.start_game(
+            rule=rapfi_rule, timeout_turn_ms=teacher_time_ms, max_memory_mb=192, threads=1
+        )
+        return cli
+
+    rapfi: Optional[RapfiClient] = None
     try:
-        with RapfiClient(Path(rapfi_bin_str)) as rapfi:
-            rapfi.start_game(
-                rule=rapfi_rule, timeout_turn_ms=teacher_time_ms, max_memory_mb=192, threads=1
-            )
-            for g in range(num_games):
-                if g > 0:
+        for g in range(num_games):
+            try:
+                if rapfi is None:
+                    rapfi = _open_rapfi()
+                elif g > 0:
                     rapfi.restart_board()
                     rapfi._send(f"INFO rule {rapfi_rule}")
                     rapfi._send(f"INFO timeout_turn {teacher_time_ms}")
@@ -828,32 +835,40 @@ def _worker_sparring_pnnue(
                             winner = player
                             break
                         player = our_player
+            except (RuntimeError, OSError, BrokenPipeError, ValueError) as exc:
+                print(f"[RapfiWorker] transient error on game {g}, respawning: {exc}", flush=True)
+                if rapfi is not None:
+                    rapfi.close()
+                    rapfi = None
+                continue
 
-                if winner == 0:
-                    draws += 1
-                elif winner == our_player:
-                    a_wins += 1
-                else:
-                    b_wins += 1
+            if winner == 0:
+                draws += 1
+            elif winner == our_player:
+                a_wins += 1
+            else:
+                b_wins += 1
 
-                zero_pol = np.zeros(BOARD_CELLS, dtype=np.float32)
-                for is_teacher, b2d_snap, p_snap, f_snap, pol_snap, sv_snap in game_records:
-                    out_val = (
-                        0.0 if winner == 0 else (1.0 if p_snap == winner else -1.0)
-                    )
-                    sval_use = (
-                        out_val
-                        if (is_teacher and sv_snap == 0.0 and winner != 0)
-                        else sv_snap
-                    )
-                    pol_use = zero_pol if (not is_teacher and winner != our_player) else pol_snap
-                    all_boards.append(b2d_snap)
-                    all_players.append(np.uint8(p_snap))
-                    all_forb.append(f_snap)
-                    all_pol.append(pol_use)
-                    all_vals.append(float(sval_use))
-                    all_out.append(float(out_val))
+            zero_pol = np.zeros(BOARD_CELLS, dtype=np.float32)
+            for is_teacher, b2d_snap, p_snap, f_snap, pol_snap, sv_snap in game_records:
+                out_val = (
+                    0.0 if winner == 0 else (1.0 if p_snap == winner else -1.0)
+                )
+                sval_use = (
+                    out_val
+                    if (is_teacher and sv_snap == 0.0 and winner != 0)
+                    else sv_snap
+                )
+                pol_use = zero_pol if (not is_teacher and winner != our_player) else pol_snap
+                all_boards.append(b2d_snap)
+                all_players.append(np.uint8(p_snap))
+                all_forb.append(f_snap)
+                all_pol.append(pol_use)
+                all_vals.append(float(sval_use))
+                all_out.append(float(out_val))
     finally:
+        if rapfi is not None:
+            rapfi.close()
         if handle:
             lib.gomoku_free_pnnue(handle)
 

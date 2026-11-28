@@ -694,21 +694,24 @@ def main() -> None:
             from rapfi_teacher import sparring_pnnue_vs_rapfi
 
             t_rapfi = Path(args.teacher_bin)
-            sp_rapfi_data, sparring_stats = sparring_pnnue_vs_rapfi(
-                lib_path=lib_path,
-                pnnue_path=champ_bin if champ_bin.exists() else None,
-                rapfi_bin=t_rapfi,
-                num_games=args.sparring_games,
-                workers=min(8, args.workers),
-                our_depth=args.sparring_depth,
-                vcf_depth=args.vcf_depth,
-                our_time=args.sparring_time,
-                teacher_time_ms=args.teacher_time_ms,
-                seed=seed_base + rnd * 65537,
-                rule=rule_name,
-            )
-            if sp_rapfi_data:
-                merged = merge_replay_buffer(buf_path, sp_rapfi_data, args.max_buffer)
+            try:
+                sp_rapfi_data, sparring_stats = sparring_pnnue_vs_rapfi(
+                    lib_path=lib_path,
+                    pnnue_path=champ_bin if champ_bin.exists() else None,
+                    rapfi_bin=t_rapfi,
+                    num_games=args.sparring_games,
+                    workers=min(8, args.workers),
+                    our_depth=args.sparring_depth,
+                    vcf_depth=args.vcf_depth,
+                    our_time=args.sparring_time,
+                    teacher_time_ms=args.teacher_time_ms,
+                    seed=seed_base + rnd * 65537,
+                    rule=rule_name,
+                )
+                if sp_rapfi_data:
+                    merged = merge_replay_buffer(buf_path, sp_rapfi_data, args.max_buffer)
+            except Exception as exc:
+                print(f"[Sparring V3 vs Rapfi] WARNING: skipped round sparring due to {exc}", flush=True)
 
         t_trn = time.time()
         cand_model = copy.deepcopy(ctx["model"])

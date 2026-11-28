@@ -4,6 +4,11 @@
 #include "board.h"
 
 typedef enum {
+    RULE_RENJU = 0,
+    RULE_FREESTYLE = 1
+} GameRule;
+
+typedef enum {
     MOVE_INVALID = 0,
     MOVE_OK,
     MOVE_BLACK_WIN,
@@ -31,11 +36,40 @@ MoveOutcome rules_apply_move(
     Cell player
 );
 
+MoveOutcome rules_apply_move_ex(
+    Board *board,
+    int row,
+    int col,
+    Cell player,
+    GameRule rule
+);
+
 /* 无副作用探针接口：试落子检查后保证恢复棋盘原状 */
 bool rules_is_winning_move(Board *board, int row, int col, Cell player);
+bool rules_is_winning_move_ex(
+    Board *board,
+    int row,
+    int col,
+    Cell player,
+    GameRule rule
+);
 ForbiddenReason rules_check_black_forbidden(Board *board, int row, int col);
+ForbiddenReason rules_check_black_forbidden_ex(
+    Board *board,
+    int row,
+    int col,
+    GameRule rule
+);
 bool rules_is_legal_move(Board *board, int row, int col, Cell player);
+bool rules_is_legal_move_ex(
+    Board *board,
+    int row,
+    int col,
+    Cell player,
+    GameRule rule
+);
 
 const char *rules_forbidden_reason_name(ForbiddenReason reason);
+const char *rules_name(GameRule rule);
 
 #endif

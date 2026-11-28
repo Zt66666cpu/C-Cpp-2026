@@ -16,6 +16,10 @@ typedef struct {
     double b_avg_time_sec;
 } MatchStats;
 
+/* 设置/查询 C 引擎默认对局规则：0 = 连珠有禁手 (RULE_RENJU), 1 = 自由无禁手 (RULE_FREESTYLE) */
+void gomoku_set_rule(int rule);
+int gomoku_get_rule(void);
+
 /* 预加载模型句柄，供 Python 多进程批量自博弈/评测复用 */
 void *gomoku_load_models(const char *nnue_path, const char *cnn_path);
 void gomoku_free_models(void *handle);

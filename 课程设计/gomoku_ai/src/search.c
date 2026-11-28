@@ -46,6 +46,7 @@ typedef struct {
     bool time_up;
     uint64_t nodes;
     Cell root_player;
+    GameRule rule;
     uint64_t zobrist;
     TTEntry *tt;
     const NnueModel *nnue;
@@ -164,15 +165,17 @@ SearchConfig search_default_config(void) {
         .use_cnn = true,
         .cnn_value_weight = 0.35f,
         .temperature = 0.0f,
-        .seed = 42ULL
+        .seed = 42ULL,
+        .rule = RULE_RENJU
     };
     return cfg;
 }
 
-int search_generate_candidates(
+int search_generate_candidates_ex(
     Board *board,
     Cell player,
     int radius,
+    GameRule rule,
     Move *out_moves,
     int max_moves
 ) {
@@ -193,7 +196,7 @@ int search_generate_candidates(
         for (int c = 0; c < BOARD_SIZE; ++c) {
             if (!board_is_empty(board, r, c)) continue;
             if (!has_neighbor_within(board, r, c, radius)) continue;
-            if (!rules_is_legal_move(board, r, c, player)) continue;
+            if (!rules_is_legal_move_ex(board, r, c, player, rule)) continue;
             scored[count].move.row = r;
             scored[count].move.col = c;
             scored[count].score = eval_move_heuristic(board, r, c, player);
@@ -204,7 +207,7 @@ int search_generate_candidates(
     if (count == 0) {
         for (int r = 0; r < BOARD_SIZE; ++r) {
             for (int c = 0; c < BOARD_SIZE; ++c) {
-                if (rules_is_legal_move(board, r, c, player)) {
+                if (rules_is_legal_move_ex(board, r, c, player, rule)) {
                     scored[count].move.row = r;
                     scored[count].move.col = c;
                     scored[count].score = eval_move_heuristic(board, r, c, player);
@@ -223,6 +226,16 @@ int search_generate_candidates(
     return out_count;
 }
 
+int search_generate_candidates(
+    Board *board,
+    Cell player,
+    int radius,
+    Move *out_moves,
+    int max_moves
+) {
+    return search_generate_candidates_ex(board, player, radius, RULE_RENJU, out_moves, max_moves);
+}
+
 /* ==================== VCF 连续冲四杀棋求解器 ==================== */
 
 static int collect_four_winning_points(
@@ -230,6 +243,7 @@ static int collect_four_winning_points(
     int row,
     int col,
     Cell attacker,
+    GameRule rule,
     Move *out_wins,
     int max_wins
 ) {
@@ -243,7 +257,7 @@ static int collect_four_winning_points(
             int nr = row + s * DR[d];
             int nc = col + s * DC[d];
             if (!board_is_empty(board, nr, nc)) continue;
-            if (rules_is_winning_move(board, nr, nc, attacker)) {
+            if (rules_is_winning_move_ex(board, nr, nc, attacker, rule)) {
                 bool dup = false;
                 for (int k = 0; k < count; ++k) {
                     if (out_wins[k].row == nr && out_wins[k].col == nc) {
@@ -265,6 +279,7 @@ static int collect_four_winning_points(
 static bool vcf_dfs(
     Board *board,
     Cell attacker,
+    GameRule rule,
     int depth_left,
     double deadline,
     Move *win_move,
@@ -279,7 +294,7 @@ static bool vcf_dfs(
 
     for (int r = 0; r < BOARD_SIZE; ++r) {
         for (int c = 0; c < BOARD_SIZE; ++c) {
-            if (rules_is_winning_move(board, r, c, attacker)) {
+            if (rules_is_winning_move_ex(board, r, c, attacker, rule)) {
                 if (win_move) {
                     win_move->row = r;
                     win_move->col = c;
@@ -294,7 +309,7 @@ static bool vcf_dfs(
     }
 
     Move cands[32];
-    int cand_count = search_generate_candidates(board, attacker, 2, cands, 32);
+    int cand_count = search_generate_candidates_ex(board, attacker, 2, rule, cands, 32);
     Cell defender = board_opponent(attacker);
 
     for (int i = 0; i < cand_count; ++i) {
@@ -304,7 +319,7 @@ static bool vcf_dfs(
 
         Move win_pts[8];
         int wp_count = collect_four_winning_points(
-            board, m.row, m.col, attacker, win_pts, 8
+            board, m.row, m.col, attacker, rule, win_pts, 8
         );
 
         if (wp_count >= 2) {
@@ -315,9 +330,9 @@ static bool vcf_dfs(
 
         if (wp_count == 1) {
             Move def = win_pts[0];
-            bool def_wins = rules_is_winning_move(board, def.row, def.col, defender);
+            bool def_wins = rules_is_winning_move_ex(board, def.row, def.col, defender, rule);
             if (!def_wins) {
-                if (!rules_is_legal_move(board, def.row, def.col, defender)) {
+                if (!rules_is_legal_move_ex(board, def.row, def.col, defender, rule)) {
                     board_undo(board, m.row, m.col);
                     if (win_move) *win_move = m;
                     return true;
@@ -326,7 +341,7 @@ static bool vcf_dfs(
                 board_place(board, def.row, def.col, defender);
                 Move dummy;
                 bool sub_win = vcf_dfs(
-                    board, attacker, depth_left - 2, deadline,
+                    board, attacker, rule, depth_left - 2, deadline,
                     &dummy, nodes, time_up
                 );
                 board_undo(board, def.row, def.col);
@@ -345,11 +360,12 @@ static bool vcf_dfs(
     return false;
 }
 
-bool search_find_vcf(
+bool search_find_vcf_ex(
     Board *board,
     Cell attacker,
     int max_depth,
     double time_limit_sec,
+    GameRule rule,
     Move *win_move,
     uint64_t *out_nodes
 ) {
@@ -360,7 +376,7 @@ bool search_find_vcf(
     uint64_t nodes = 0;
     bool time_up = false;
     bool found = vcf_dfs(
-        board, attacker, max_depth, deadline, win_move, &nodes, &time_up
+        board, attacker, rule, max_depth, deadline, win_move, &nodes, &time_up
     );
     if (out_nodes) {
         *out_nodes = nodes;
@@ -368,18 +384,32 @@ bool search_find_vcf(
     return found;
 }
 
+bool search_find_vcf(
+    Board *board,
+    Cell attacker,
+    int max_depth,
+    double time_limit_sec,
+    Move *win_move,
+    uint64_t *out_nodes
+) {
+    return search_find_vcf_ex(
+        board, attacker, max_depth, time_limit_sec, RULE_RENJU, win_move, out_nodes
+    );
+}
+
 /* ==================== 战术护栏与启发式排序 ==================== */
 
 static bool check_tactical_guardrail(
     Board *board,
     Cell player,
+    GameRule rule,
     const NnueModel *nnue,
     Move *out_move,
     int *out_score
 ) {
     for (int r = 0; r < BOARD_SIZE; ++r) {
         for (int c = 0; c < BOARD_SIZE; ++c) {
-            if (rules_is_winning_move(board, r, c, player)) {
+            if (rules_is_winning_move_ex(board, r, c, player, rule)) {
                 out_move->row = r;
                 out_move->col = c;
                 *out_score = EVAL_MATE_SCORE - 1;
@@ -393,8 +423,8 @@ static bool check_tactical_guardrail(
     int defense_count = 0;
     for (int r = 0; r < BOARD_SIZE; ++r) {
         for (int c = 0; c < BOARD_SIZE; ++c) {
-            if (rules_is_winning_move(board, r, c, opp)
-                && rules_is_legal_move(board, r, c, player)) {
+            if (rules_is_winning_move_ex(board, r, c, opp, rule)
+                && rules_is_legal_move_ex(board, r, c, player, rule)) {
                 defense_moves[defense_count].row = r;
                 defense_moves[defense_count].col = c;
                 ++defense_count;
@@ -428,7 +458,7 @@ static int generate_ordered_moves(
         for (int c = 0; c < BOARD_SIZE; ++c) {
             if (!board_is_empty(board, r, c)) continue;
             if (!has_neighbor_within(board, r, c, 2)) continue;
-            if (!rules_is_legal_move(board, r, c, player)) continue;
+            if (!rules_is_legal_move_ex(board, r, c, player, state->rule)) continue;
 
             Move m = {r, c};
             int s = eval_move_heuristic(board, r, c, player);
@@ -451,7 +481,7 @@ static int generate_ordered_moves(
     if (count == 0) {
         for (int r = 0; r < BOARD_SIZE; ++r) {
             for (int c = 0; c < BOARD_SIZE; ++c) {
-                if (rules_is_legal_move(board, r, c, player)) {
+                if (rules_is_legal_move_ex(board, r, c, player, state->rule)) {
                     scored[count].move.row = r;
                     scored[count].move.col = c;
                     scored[count].score = eval_move_heuristic(board, r, c, player);
@@ -538,7 +568,7 @@ static int negamax(
     for (int i = 0; i < cand_count; ++i) {
         Move m = candidates[i];
 
-        if (rules_is_winning_move(board, m.row, m.col, player)) {
+        if (rules_is_winning_move_ex(board, m.row, m.col, player, state->rule)) {
             int win_score = EVAL_MATE_SCORE - ply - 1;
             tte->key = state->zobrist;
             tte->depth = (int16_t)depth;
@@ -668,7 +698,7 @@ SearchResult search_find_best_move(
     }
 
     Move root_moves[28];
-    int root_count = search_generate_candidates(board, player, 2, root_moves, 22);
+    int root_count = search_generate_candidates_ex(board, player, 2, cfg.rule, root_moves, 22);
     if (root_count == 0) {
         return result;
     }
@@ -679,7 +709,7 @@ SearchResult search_find_best_move(
     /* Layer 1 战术护栏 */
     Move guard_move;
     int guard_score = 0;
-    if (check_tactical_guardrail(board, player, active_nnue, &guard_move, &guard_score)) {
+    if (check_tactical_guardrail(board, player, cfg.rule, active_nnue, &guard_move, &guard_score)) {
         result.best_move = guard_move;
         result.root_policy[guard_move.row * BOARD_SIZE + guard_move.col] = 1.0f;
         result.stats.used_guardrail = true;
@@ -696,8 +726,8 @@ SearchResult search_find_best_move(
         uint64_t vcf_nodes = 0;
         double vcf_budget = budget * 0.25;
         if (vcf_budget > 1.5) vcf_budget = 1.5;
-        if (search_find_vcf(
-                board, player, cfg.vcf_max_depth, vcf_budget, &vcf_move, &vcf_nodes
+        if (search_find_vcf_ex(
+                board, player, cfg.vcf_max_depth, vcf_budget, cfg.rule, &vcf_move, &vcf_nodes
             )) {
             result.best_move = vcf_move;
             result.root_policy[vcf_move.row * BOARD_SIZE + vcf_move.col] = 1.0f;
@@ -719,11 +749,12 @@ SearchResult search_find_best_move(
         float cnn_in[BOARD_CELLS * CNN_INPUT_CHANNELS];
         float logits[BOARD_CELLS];
         bool legal_mask[BOARD_CELLS];
-        nn_build_cnn_input(board, player, last_move, cnn_in);
+        nn_build_cnn_input_ex(board, player, last_move, cfg.rule, cnn_in);
         cnn_forward(active_cnn, cnn_in, logits);
         for (int r = 0; r < BOARD_SIZE; ++r) {
             for (int c = 0; c < BOARD_SIZE; ++c) {
-                legal_mask[r * BOARD_SIZE + c] = rules_is_legal_move(board, r, c, player);
+                legal_mask[r * BOARD_SIZE + c] =
+                    rules_is_legal_move_ex(board, r, c, player, cfg.rule);
             }
         }
         cnn_masked_softmax(logits, legal_mask, cnn_prior);
@@ -782,6 +813,7 @@ SearchResult search_find_best_move(
     memset(&state, 0, sizeof(state));
     state.deadline = start_time + budget;
     state.root_player = player;
+    state.rule = cfg.rule;
     state.zobrist = search_compute_zobrist(board, player);
     state.tt = tt;
     state.nnue = active_nnue;
@@ -979,7 +1011,7 @@ SearchResult search_find_best_move(
             Move m = root_moves[idx];
             board_place(board, m.row, m.col, player);
             float cnn_in[BOARD_CELLS * CNN_INPUT_CHANNELS];
-            nn_build_cnn_input(board, opp, m, cnn_in);
+            nn_build_cnn_input_ex(board, opp, m, cfg.rule, cnn_in);
             float opp_val = cnn_forward(active_cnn, cnn_in, NULL);
             board_undo(board, m.row, m.col);
 
@@ -1044,6 +1076,7 @@ typedef struct {
     bool time_up;
     uint64_t nodes;
     Cell root_player;
+    GameRule rule;
     uint64_t zobrist;
     uint32_t tt_gen;
     PnnueTTEntry *tt;
@@ -1105,7 +1138,7 @@ static int generate_pnnue_moves(
         for (int c = 0; c < BOARD_SIZE; ++c) {
             if (!board_is_empty(board, r, c)) continue;
             if (!has_neighbor_within(board, r, c, 2)) continue;
-            if (!rules_is_legal_move(board, r, c, player)) continue;
+            if (!rules_is_legal_move_ex(board, r, c, player, state->rule)) continue;
 
             Move m = {r, c};
             float logit = pnnue_eval_policy_cell(state->acc, state->pnnue, r, c, player);
@@ -1124,7 +1157,7 @@ static int generate_pnnue_moves(
     if (count == 0) {
         for (int r = 0; r < BOARD_SIZE; ++r) {
             for (int c = 0; c < BOARD_SIZE; ++c) {
-                if (rules_is_legal_move(board, r, c, player)) {
+                if (rules_is_legal_move_ex(board, r, c, player, state->rule)) {
                     float logit = pnnue_eval_policy_cell(state->acc, state->pnnue, r, c, player);
                     int h = eval_move_heuristic(board, r, c, player);
                     if (count == 0 || logit > max_logit) {
@@ -1240,7 +1273,7 @@ static int negamax_pnnue(
     for (int i = 0; i < cand_count; ++i) {
         Move m = candidates[i];
 
-        if (rules_is_winning_move(board, m.row, m.col, player)) {
+        if (rules_is_winning_move_ex(board, m.row, m.col, player, state->rule)) {
             int win_score = EVAL_MATE_SCORE - ply - 1;
             tte->key = state->zobrist;
             tte->depth = (int16_t)depth;
@@ -1364,7 +1397,7 @@ SearchResult search_find_best_move_pnnue(
     /* Layer 1 战术护栏 */
     Move guard_move;
     int guard_score = 0;
-    if (check_tactical_guardrail(board, player, NULL, &guard_move, &guard_score)) {
+    if (check_tactical_guardrail(board, player, cfg.rule, NULL, &guard_move, &guard_score)) {
         result.best_move = guard_move;
         result.root_policy[guard_move.row * BOARD_SIZE + guard_move.col] = 1.0f;
         result.valid = true;
@@ -1382,8 +1415,8 @@ SearchResult search_find_best_move_pnnue(
         uint64_t vcf_nodes = 0;
         double vcf_budget = budget * 0.25;
         if (vcf_budget > 1.5) vcf_budget = 1.5;
-        if (search_find_vcf(
-                board, player, cfg.vcf_max_depth, vcf_budget, &vcf_move, &vcf_nodes
+        if (search_find_vcf_ex(
+                board, player, cfg.vcf_max_depth, vcf_budget, cfg.rule, &vcf_move, &vcf_nodes
             )) {
             result.best_move = vcf_move;
             result.root_policy[vcf_move.row * BOARD_SIZE + vcf_move.col] = 1.0f;
@@ -1414,12 +1447,14 @@ SearchResult search_find_best_move_pnnue(
 
     uint64_t model_seed = (uint64_t)(uintptr_t)pnnue;
     uint64_t model_salt = splitmix64(&model_seed);
+    uint64_t rule_salt = (cfg.rule == RULE_FREESTYLE) ? 0xD1B54A32D192ED03ULL : 0ULL;
 
     PnnueSearchState state;
     memset(&state, 0, sizeof(state));
     state.deadline = start_time + budget;
     state.root_player = player;
-    state.zobrist = search_compute_zobrist(board, player) ^ model_salt;
+    state.rule = cfg.rule;
+    state.zobrist = search_compute_zobrist(board, player) ^ model_salt ^ rule_salt;
     state.tt_gen = tt_gen;
     state.tt = tt;
     state.pnnue = pnnue;

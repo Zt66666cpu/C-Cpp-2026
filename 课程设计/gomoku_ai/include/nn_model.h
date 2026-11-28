@@ -3,6 +3,7 @@
 
 #include "board.h"
 #include "eval.h"
+#include "rules.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -73,6 +74,14 @@ void nn_build_cnn_input(
     Board *board,
     Cell side_to_move,
     Move last_move,
+    float *out_hwc
+);
+
+void nn_build_cnn_input_ex(
+    Board *board,
+    Cell side_to_move,
+    Move last_move,
+    GameRule rule,
     float *out_hwc
 );
 

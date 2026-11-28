@@ -195,7 +195,9 @@ class RapfiClient:
                 pass
 
 
-def _is_five_in_row(board: np.ndarray, row: int, col: int, player: int) -> bool:
+def _is_five_in_row(
+    board: np.ndarray, row: int, col: int, player: int, freestyle: bool = False
+) -> bool:
     b2d = board.reshape(BOARD_SIZE, BOARD_SIZE)
     for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
         cnt = 1
@@ -205,7 +207,10 @@ def _is_five_in_row(board: np.ndarray, row: int, col: int, player: int) -> bool:
                 cnt += 1
                 r += sign * dr
                 c += sign * dc
-        if player == 1:
+        if freestyle:
+            if cnt >= 5:
+                return True
+        elif player == 1:
             if cnt == 5:
                 return True
         else:
@@ -311,9 +316,15 @@ def _worker_sparring(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int,
         record_data,
         deterministic_openings,
         pair_offset,
+        rule,
     ) = args
 
+    freestyle = str(rule).strip().lower() in ("freestyle", "free", "1")
+    rapfi_rule = 0 if freestyle else 4
+
     lib = _bind_lib(Path(lib_path_str))
+    if hasattr(lib, "gomoku_set_rule"):
+        lib.gomoku_set_rule(1 if freestyle else 0)
     handle = lib.gomoku_load_models(
         nnue_path_str.encode("utf-8") if nnue_path_str else b"",
         cnn_path_str.encode("utf-8") if cnn_path_str else b"",
@@ -340,11 +351,13 @@ def _worker_sparring(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int,
 
     try:
         with RapfiClient(Path(rapfi_bin_str)) as rapfi:
-            rapfi.start_game(rule=4, timeout_turn_ms=teacher_time_ms, max_memory_mb=256, threads=1)
+            rapfi.start_game(
+                rule=rapfi_rule, timeout_turn_ms=teacher_time_ms, max_memory_mb=256, threads=1
+            )
             for g in range(num_games):
                 if g > 0:
                     rapfi.restart_board()
-                    rapfi._send("INFO rule 4")
+                    rapfi._send(f"INFO rule {rapfi_rule}")
                     rapfi._send(f"INFO timeout_turn {teacher_time_ms}")
                     rapfi._send("INFO thread_num 1")
 
@@ -404,7 +417,7 @@ def _worker_sparring(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int,
                         board[move_idx] = player
                         moves_history.append((r, c, player))
                         last_move = move_idx
-                        if _is_five_in_row(board, r, c, player):
+                        if _is_five_in_row(board, r, c, player, freestyle=freestyle):
                             winner = player
                             break
                         player = rapfi_player
@@ -421,7 +434,11 @@ def _worker_sparring(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int,
                         b_moves += 1
 
                         move_idx = r * BOARD_SIZE + c
-                        if not (0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE) or board[move_idx] != 0 or forb[move_idx] != 0:
+                        if (
+                            not (0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE)
+                            or board[move_idx] != 0
+                            or (not freestyle and forb[move_idx] != 0)
+                        ):
                             winner = our_player
                             break
 
@@ -434,7 +451,7 @@ def _worker_sparring(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int,
                         board[move_idx] = player
                         moves_history.append((r, c, player))
                         last_move = move_idx
-                        if _is_five_in_row(board, r, c, player):
+                        if _is_five_in_row(board, r, c, player, freestyle=freestyle):
                             winner = player
                             break
                         player = our_player
@@ -493,7 +510,9 @@ def _run_rapfi_parallel(
     seed: int,
     record_data: bool,
     deterministic_openings: bool,
+    rule: str = "renju",
 ) -> Tuple[Dict[str, np.ndarray], MatchStats]:
+    rule_norm = "freestyle" if str(rule).strip().lower() in ("freestyle", "free", "1") else "renju"
     nnue_str = str(nnue_path) if (nnue_path and nnue_path.exists()) else ""
     cnn_str = str(cnn_path) if (cnn_path and cnn_path.exists()) else ""
 
@@ -528,6 +547,7 @@ def _run_rapfi_parallel(
             record_data,
             deterministic_openings,
             pair_off,
+            rule_norm,
         ))
         pair_off += gc // 2
 
@@ -579,6 +599,7 @@ def generate_rapfi_sparring_parallel(
     cnn_weight: float,
     teacher_time_ms: int,
     seed: int,
+    rule: str = "renju",
 ) -> Tuple[Dict[str, np.ndarray], MatchStats]:
     return _run_rapfi_parallel(
         lib_path=lib_path,
@@ -595,6 +616,7 @@ def generate_rapfi_sparring_parallel(
         seed=seed,
         record_data=True,
         deterministic_openings=False,
+        rule=rule,
     )
 
 
@@ -611,6 +633,7 @@ def eval_vs_rapfi_parallel(
     cnn_weight: float,
     teacher_time_ms: int,
     seed: int,
+    rule: str = "renju",
 ) -> MatchStats:
     _, stats = _run_rapfi_parallel(
         lib_path=lib_path,
@@ -627,6 +650,7 @@ def eval_vs_rapfi_parallel(
         seed=seed,
         record_data=False,
         deterministic_openings=True,
+        rule=rule,
     )
     return stats
 
@@ -644,9 +668,15 @@ def _worker_sparring_pnnue(
         our_time,
         teacher_time_ms,
         base_seed,
+        rule,
     ) = args
 
+    freestyle = str(rule).strip().lower() in ("freestyle", "free", "1")
+    rapfi_rule = 0 if freestyle else 4
+
     lib = _bind_lib(Path(lib_path_str))
+    if hasattr(lib, "gomoku_set_rule"):
+        lib.gomoku_set_rule(1 if freestyle else 0)
     handle = (
         lib.gomoku_load_pnnue(pnnue_path_str.encode("utf-8"))
         if pnnue_path_str
@@ -673,12 +703,12 @@ def _worker_sparring_pnnue(
     try:
         with RapfiClient(Path(rapfi_bin_str)) as rapfi:
             rapfi.start_game(
-                rule=4, timeout_turn_ms=teacher_time_ms, max_memory_mb=192, threads=1
+                rule=rapfi_rule, timeout_turn_ms=teacher_time_ms, max_memory_mb=192, threads=1
             )
             for g in range(num_games):
                 if g > 0:
                     rapfi.restart_board()
-                    rapfi._send("INFO rule 4")
+                    rapfi._send(f"INFO rule {rapfi_rule}")
                     rapfi._send(f"INFO timeout_turn {teacher_time_ms}")
                     rapfi._send("INFO thread_num 1")
 
@@ -730,7 +760,7 @@ def _worker_sparring_pnnue(
                             move_idx < 0
                             or move_idx >= BOARD_CELLS
                             or board[move_idx] != 0
-                            or forb[move_idx] != 0
+                            or (not freestyle and player == 1 and forb[move_idx] != 0)
                         ):
                             illegal += 1
                             winner = rapfi_player
@@ -751,7 +781,7 @@ def _worker_sparring_pnnue(
                         board[move_idx] = player
                         moves_history.append((r, c, player))
                         last_move = move_idx
-                        if _is_five_in_row(board, r, c, player):
+                        if _is_five_in_row(board, r, c, player, freestyle=freestyle):
                             winner = player
                             break
                         player = rapfi_player
@@ -771,12 +801,14 @@ def _worker_sparring_pnnue(
                         if (
                             not (0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE)
                             or board[move_idx] != 0
-                            or (player == 1 and forb[move_idx] != 0)
+                            or (not freestyle and player == 1 and forb[move_idx] != 0)
                         ):
                             winner = our_player
                             break
 
-                        forb_for_pol = forb if player == 1 else np.zeros_like(forb)
+                        forb_for_pol = (
+                            forb if (not freestyle and player == 1) else np.zeros_like(forb)
+                        )
                         pol = _teacher_policy(board, forb_for_pol, r, c)
                         game_records.append(
                             (
@@ -792,7 +824,7 @@ def _worker_sparring_pnnue(
                         board[move_idx] = player
                         moves_history.append((r, c, player))
                         last_move = move_idx
-                        if _is_five_in_row(board, r, c, player):
+                        if _is_five_in_row(board, r, c, player, freestyle=freestyle):
                             winner = player
                             break
                         player = our_player
@@ -849,7 +881,9 @@ def sparring_pnnue_vs_rapfi(
     our_time: float,
     teacher_time_ms: int,
     seed: int,
+    rule: str = "renju",
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
+    rule_norm = "freestyle" if str(rule).strip().lower() in ("freestyle", "free", "1") else "renju"
     p_str = str(pnnue_path) if (pnnue_path and Path(pnnue_path).exists()) else ""
     eff_workers = max(1, min(workers, num_games))
     counts = [num_games // eff_workers] * eff_workers
@@ -871,6 +905,7 @@ def sparring_pnnue_vs_rapfi(
                 our_time,
                 teacher_time_ms,
                 seed + idx * 100003,
+                rule_norm,
             )
         )
 

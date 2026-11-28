@@ -294,6 +294,7 @@
 
     .seg.cols-4 { grid-template-columns: repeat(4, 1fr); }
     .seg.cols-3 { grid-template-columns: repeat(3, 1fr); }
+    .seg.cols-2 { grid-template-columns: repeat(2, 1fr); }
 
     button {
       font-family: inherit;
@@ -455,8 +456,8 @@
   <header>
     <div class="brand">
       <div class="brand-dot"></div>
-      <h1>连珠五子棋 AI 实验室</h1>
-      <span>纯 C11 引擎直连 · Renju 禁手规则</span>
+      <h1>五子棋 AI 实验室</h1>
+      <span id="ruleBadge">纯 C11 引擎直连 · 有禁手 (连珠)</span>
     </div>
     <div class="engine-badge">
       <span id="libInfo">正在连接 C11 引擎...</span>
@@ -494,7 +495,11 @@
       </div>
 
       <div class="card">
-        <div class="card-title"><span>对局模式与引擎</span><span id="viewBadge">实时对局</span></div>
+        <div class="card-title"><span>对局模式、规则与引擎</span><span id="viewBadge">实时对局</span></div>
+        <div class="seg cols-2" id="ruleGroup">
+          <button data-rule="renju" class="active">有禁手 · 连珠 (Renju)</button>
+          <button data-rule="freestyle">无禁手 · 自由 (Free-style)</button>
+        </div>
         <div class="seg cols-4" id="modeGroup">
           <button data-mode="human_black" class="active">人机·执黑</button>
           <button data-mode="human_white">人机·执白</button>
@@ -562,6 +567,7 @@
     const COLS = "ABCDEFGHIJKLMNO";
 
     const state = {
+      rule: "renju",
       mode: "human_black",
       engine: "v3",
       depth: 6,
@@ -683,7 +689,7 @@
       const player = nextPlayerAt(ply);
       state.board = board;
 
-      const st = await apiPost("/api/state", { board, player, need_prior: needPrior });
+      const st = await apiPost("/api/state", { board, player, rule: state.rule, need_prior: needPrior });
       if (myGen !== state.genId || ply !== state.viewPly) return;
 
       state.forbidden = st.forbidden || new Array(CELLS).fill(0);
@@ -768,6 +774,7 @@
           board,
           player,
           last_move: lastMove,
+          rule: state.rule,
           engine: state.engine,
           depth: state.depth,
           time_limit: state.timeLimit,
@@ -820,7 +827,7 @@
       if (state.board[idx] !== 0) return;
 
       const player = nextPlayerAt(state.moves.length);
-      if (player === 1 && state.forbidden[idx]) {
+      if (state.rule === "renju" && player === 1 && state.forbidden[idx]) {
         showToast(`禁手点位 (${coordName(r, c)})：黑方三三/四四/长连禁手不可落子`);
         return;
       }
@@ -852,6 +859,7 @@
           board,
           player,
           last_move: lastMove,
+          rule: state.rule,
           engine: state.engine,
           depth: state.depth,
           time_limit: state.timeLimit,
@@ -1020,9 +1028,9 @@
         }
       }
 
-      // Forbidden markers (Black's turn only)
+      // Forbidden markers (Black's turn only in Renju)
       const curPlayer = nextPlayerAt(state.viewPly);
-      if (state.showForb && curPlayer === 1 && state.winner === 0) {
+      if (state.rule === "renju" && state.showForb && curPlayer === 1 && state.winner === 0) {
         ctx.strokeStyle = "rgba(210, 38, 48, 0.9)";
         ctx.lineWidth = 2.1;
         const arm = step * 0.20;
@@ -1046,7 +1054,7 @@
       if (state.hoverCell >= 0 && isHumanTurn() && !state.thinking && state.board[state.hoverCell] === 0) {
         const hr = Math.floor(state.hoverCell / N);
         const hc = state.hoverCell % N;
-        if (!(curPlayer === 1 && state.forbidden[state.hoverCell])) {
+        if (!(state.rule === "renju" && curPlayer === 1 && state.forbidden[state.hoverCell])) {
           const hx = pad + hc * step;
           const hy = pad + hr * step;
           ctx.save();
@@ -1292,6 +1300,30 @@
       const relX = Math.max(0, Math.min(1, (e.clientX - rect.left - 10) / Math.max(1, rect.width - 20)));
       const ply = Math.round(relX * state.moves.length);
       setViewPly(ply);
+    });
+
+    document.querySelectorAll("#ruleGroup button").forEach((btn) => {
+      btn.onclick = () => {
+        const nextRule = btn.dataset.rule;
+        if (nextRule === state.rule) return;
+        document.querySelectorAll("#ruleGroup button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        state.rule = nextRule;
+        const badge = document.getElementById("ruleBadge");
+        if (nextRule === "freestyle") {
+          const hasDedicated = !!(state.modelsAvail && state.modelsAvail.v3_freestyle);
+          badge.textContent = hasDedicated
+            ? "纯 C11 引擎直连 · 无禁手 (自由·专用模型)"
+            : "纯 C11 引擎直连 · 无禁手 (自由·兼容权重)";
+          document.getElementById("togForb").disabled = true;
+        } else {
+          badge.textContent = "纯 C11 引擎直连 · 有禁手 (连珠)";
+          document.getElementById("togForb").disabled = false;
+        }
+        state.paused = false;
+        showToast(nextRule === "freestyle" ? "已切换为【无禁手·自由模式】，重开新局" : "已切换为【有禁手·连珠模式】，重开新局");
+        newGame();
+      };
     });
 
     document.querySelectorAll("#modeGroup button").forEach((btn) => {

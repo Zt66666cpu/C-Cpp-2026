@@ -317,49 +317,55 @@ def run_verify_only(
     print(f"[Parity {arch.upper()}] PASSED (< 1e-4)")
 
 
-def run_smoke_test(dim: int, v_hidden: int) -> None:
+def run_smoke_test(dim: int, v_hidden: int, rule_mode: str = "renju") -> None:
     lib_path = find_engine_lib(PROJECT_ROOT)
     model = PatternNnueNet(dim=dim, v_hidden=v_hidden)
+    rules = ["renju", "freestyle"] if rule_mode == "both" else [rule_mode]
     with tempfile.TemporaryDirectory() as tmpdir:
         bin_path = Path(tmpdir) / "smoke_pnnue.bin"
         export_pnnue_bin(model, bin_path)
-        t0 = time.time()
-        data = generate_pnnue_games_parallel(
-            lib_path=lib_path,
-            pnnue_path=bin_path,
-            num_games=4,
-            workers=2,
-            max_depth=2,
-            vcf_depth=6,
-            time_limit=0.15,
-            random_opening_plies=2,
-            explore_temp=0.4,
-            seed=777,
-        )
-        gen_sec = time.time() - t0
-        assert data and len(data["boards"]) > 0, "Smoke self-play produced 0 samples"
-        arena = run_pnnue_arena_parallel(
-            lib_path=lib_path,
-            pnnue_a_path=bin_path,
-            pnnue_b_path=None,
-            v2_b_nnue_path=None,
-            v2_b_cnn_path=None,
-            num_games=4,
-            workers=2,
-            a_depth=2,
-            a_vcf=6,
-            a_time=0.15,
-            b_depth=2,
-            b_vcf=6,
-            b_time=0.15,
-            b_cnn_w=0.0,
-            seed=999,
-        )
-        assert arena["illegal"] == 0, f"Smoke arena illegal move detected: {arena}"
-        print(
-            f"[Smoke V3] selfplay={len(data['boards'])} positions in {gen_sec:.2f}s | "
-            f"arena_vs_heuristic={arena}"
-        )
+        for rule in rules:
+            t0 = time.time()
+            data = generate_pnnue_games_parallel(
+                lib_path=lib_path,
+                pnnue_path=bin_path,
+                num_games=4,
+                workers=2,
+                max_depth=2,
+                vcf_depth=6,
+                time_limit=0.15,
+                random_opening_plies=2,
+                explore_temp=0.4,
+                seed=777 if rule == "renju" else 888,
+                rule=rule,
+            )
+            gen_sec = time.time() - t0
+            assert data and len(data["boards"]) > 0, f"Smoke self-play ({rule}) produced 0 samples"
+            if rule == "freestyle":
+                assert int(data["forbidden"].sum()) == 0, "Freestyle selfplay must have zero forbidden flags"
+            arena = run_pnnue_arena_parallel(
+                lib_path=lib_path,
+                pnnue_a_path=bin_path,
+                pnnue_b_path=None,
+                v2_b_nnue_path=None,
+                v2_b_cnn_path=None,
+                num_games=4,
+                workers=2,
+                a_depth=2,
+                a_vcf=6,
+                a_time=0.15,
+                b_depth=2,
+                b_vcf=6,
+                b_time=0.15,
+                b_cnn_w=0.0,
+                seed=999 if rule == "renju" else 1111,
+                rule=rule,
+            )
+            assert arena["illegal"] == 0, f"Smoke arena ({rule}) illegal move detected: {arena}"
+            print(
+                f"[Smoke V3 rule={rule}] selfplay={len(data['boards'])} positions in {gen_sec:.2f}s | "
+                f"arena_vs_heuristic={arena}"
+            )
 
 
 def main() -> None:
@@ -421,7 +427,20 @@ def main() -> None:
         help="晋级外部锚点最低阈值：候选对 Heuristic 胜率须 >= 该值方允许覆盖冠军",
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--rule",
+        type=str,
+        default="renju",
+        choices=("renju", "freestyle", "both"),
+        help="对弈与训练规则：renju(有禁手), freestyle(无禁手), both(双模式交替训练)",
+    )
     parser.add_argument("--run-dir", type=str, default="training/runs_v3")
+    parser.add_argument("--run-dir-freestyle", type=str, default="training/runs_freestyle")
+    parser.add_argument(
+        "--no-cross-init",
+        action="store_true",
+        help="无禁手首次启动时不从有禁手冠军迁移权重热启动",
+    )
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--seed", type=int, default=20261127)
     args = parser.parse_args()
@@ -430,23 +449,12 @@ def main() -> None:
         run_verify_only(args.dim, args.v_hidden, arch=args.arch, v_h1=args.v_h1, v_h2=args.v_h2)
         return
     if args.smoke_test:
-        run_smoke_test(args.dim, args.v_hidden)
+        run_smoke_test(args.dim, args.v_hidden, rule_mode=args.rule)
         return
 
     lib_path = find_engine_lib(PROJECT_ROOT)
     device = select_device(args.device)
-    run_dir = Path(args.run_dir)
-    if not run_dir.is_absolute():
-        run_dir = PROJECT_ROOT / run_dir
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    prod_bin = PROJECT_ROOT / "models" / "pnnue.bin"
-    champ_bin = run_dir / "pnnue_champ.bin"
-    cand_bin = run_dir / "pnnue_cand.bin"
-    ckpt_path = run_dir / "pnnue_champ.pt"
-    buf_path = run_dir / "pnnue_buffer.npz"
     metrics_path = PROJECT_ROOT / "training" / "runs" / "metrics.jsonl"
-
     v2_nnue_bin = PROJECT_ROOT / "models" / "nnue.bin"
     v2_cnn_bin = PROJECT_ROOT / "models" / "cnn.bin"
 
@@ -455,114 +463,173 @@ def main() -> None:
             return PatternNnueV4Net(dim=args.dim, v_h1=args.v_h1, v_h2=args.v_h2)
         return PatternNnueNet(dim=args.dim, v_hidden=args.v_hidden)
 
-    active_arch = args.arch
-    model = _make_model(active_arch)
-    start_round = 1
-    resumed = False
-    if args.resume and ckpt_path.exists():
-        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-        sd = ckpt["model"]
-        ckpt_arch = "v4" if "v2_w1" in sd else "v3"
-        if active_arch == "v4" and ckpt_arch == "v3":
-            load_backbone_from_v3_state(model, sd)
-            print("[Trainer V4] Initialized V4 backbone (emb/policy) from V3 checkpoint")
-        else:
-            if ckpt_arch != active_arch:
-                active_arch = ckpt_arch
-                model = _make_model(active_arch)
-            model.load_state_dict(sd)
-        max_logged_round = 0
-        if metrics_path.exists():
-            for ln in metrics_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                s = ln.strip()
-                if not s:
-                    continue
-                try:
-                    row = json.loads(s)
-                    if row.get("phase") == "v3_pnnue":
-                        max_logged_round = max(max_logged_round, int(row.get("round") or 0))
-                except Exception:
-                    continue
-        start_round = max(int(ckpt.get("round", 0)), max_logged_round) + 1
-        resumed = True
-        print(f"[Trainer {active_arch.upper()}] Resumed checkpoint from round {start_round - 1}")
-    elif active_arch == "v4" and args.init_v3_backbone:
-        bb_path = Path(args.init_v3_backbone)
-        if not bb_path.is_absolute():
-            bb_path = PROJECT_ROOT / bb_path
-        if bb_path.exists():
-            bb_ckpt = torch.load(bb_path, map_location="cpu", weights_only=True)
-            load_backbone_from_v3_state(model, bb_ckpt["model"])
-            print(f"[Trainer V4] Warm-started backbone from {bb_path}")
+    def _resolve_dir(raw_dir: str) -> Path:
+        p = Path(raw_dir)
+        return p if p.is_absolute() else (PROJECT_ROOT / p)
 
-    pretrain_paths: List[Path] = []
-    for item in args.pretrain_buffer:
-        for part in str(item).split(","):
-            part = part.strip()
-            if not part:
-                continue
-            p = Path(part)
-            if not p.is_absolute():
-                p = PROJECT_ROOT / p
-            if p.exists():
-                pretrain_paths.append(p)
+    renju_run_dir = _resolve_dir(args.run_dir)
+    freestyle_run_dir = _resolve_dir(args.run_dir_freestyle)
+
+    def _init_rule_context(rule_name: str) -> Dict:
+        is_free = rule_name == "freestyle"
+        rdir = freestyle_run_dir if is_free else renju_run_dir
+        rdir.mkdir(parents=True, exist_ok=True)
+        phase_name = "v3_freestyle" if is_free else "v3_pnnue"
+        prod_bin = PROJECT_ROOT / "models" / ("pnnue_freestyle.bin" if is_free else "pnnue.bin")
+        champ_bin = rdir / "pnnue_champ.bin"
+        cand_bin = rdir / "pnnue_cand.bin"
+        ckpt_path = rdir / "pnnue_champ.pt"
+        buf_path = rdir / "pnnue_buffer.npz"
+
+        active_arch = args.arch
+        model = _make_model(active_arch)
+        start_round = 1
+        resumed = False
+        if args.resume and ckpt_path.exists():
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+            sd = ckpt["model"]
+            ckpt_arch = "v4" if "v2_w1" in sd else "v3"
+            if active_arch == "v4" and ckpt_arch == "v3":
+                load_backbone_from_v3_state(model, sd)
+                print(f"[Trainer V4:{rule_name}] Initialized V4 backbone (emb/policy) from V3 checkpoint")
             else:
-                print(f"[Pretrain V3] WARNING: buffer not found, skipped: {p}")
-    if resumed and pretrain_paths and not args.force_pretrain:
-        print("[Pretrain V3] Resumed from checkpoint -> skip pretraining (use --force-pretrain to override)")
-        pretrain_paths = []
+                if ckpt_arch != active_arch:
+                    active_arch = ckpt_arch
+                    model = _make_model(active_arch)
+                model.load_state_dict(sd)
+            max_logged_round = 0
+            if metrics_path.exists():
+                for ln in metrics_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    s = ln.strip()
+                    if not s:
+                        continue
+                    try:
+                        row = json.loads(s)
+                        if row.get("phase") == phase_name:
+                            max_logged_round = max(max_logged_round, int(row.get("round") or 0))
+                    except Exception:
+                        continue
+            start_round = max(int(ckpt.get("round", 0)), max_logged_round) + 1
+            resumed = True
+            print(f"[Trainer {active_arch.upper()}:{rule_name}] Resumed checkpoint from round {start_round - 1}")
+        elif is_free and not args.no_cross_init:
+            renju_ckpt = renju_run_dir / "pnnue_champ.pt"
+            if renju_ckpt.exists():
+                rckpt = torch.load(renju_ckpt, map_location="cpu", weights_only=True)
+                rsd = rckpt["model"]
+                renju_arch = "v4" if "v2_w1" in rsd else "v3"
+                if renju_arch == active_arch:
+                    model.load_state_dict(rsd)
+                    print(f"[Trainer {active_arch.upper()}:freestyle] Warm-started full weights from {renju_ckpt}")
+                elif active_arch == "v4" and renju_arch == "v3":
+                    load_backbone_from_v3_state(model, rsd)
+                    print(f"[Trainer V4:freestyle] Warm-started V4 backbone from {renju_ckpt}")
+        elif active_arch == "v4" and args.init_v3_backbone:
+            bb_path = Path(args.init_v3_backbone)
+            if not bb_path.is_absolute():
+                bb_path = PROJECT_ROOT / bb_path
+            if bb_path.exists():
+                bb_ckpt = torch.load(bb_path, map_location="cpu", weights_only=True)
+                load_backbone_from_v3_state(model, bb_ckpt["model"])
+                print(f"[Trainer V4:{rule_name}] Warm-started backbone from {bb_path}")
+
+        pretrain_paths: List[Path] = []
+        if not is_free or len([r for r in target_rules]) == 1:
+            for item in args.pretrain_buffer:
+                for part in str(item).split(","):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    p = Path(part)
+                    if not p.is_absolute():
+                        p = PROJECT_ROOT / p
+                    if p.exists():
+                        pretrain_paths.append(p)
+                    else:
+                        print(f"[Pretrain V3:{rule_name}] WARNING: buffer not found, skipped: {p}")
+        if resumed and pretrain_paths and not args.force_pretrain:
+            print(f"[Pretrain V3:{rule_name}] Resumed from checkpoint -> skip pretraining")
+            pretrain_paths = []
+
+        if pretrain_paths:
+            merged = None
+            for pre_path in pretrain_paths:
+                print(f"[Pretrain V3:{rule_name}] Loading buffer: {pre_path}")
+                pre_data = load_npz_dataset(pre_path)
+                print(f"[Pretrain V3:{rule_name}]   +{len(pre_data['boards'])} positions")
+                merged = merge_replay_buffer(buf_path, pre_data, args.max_buffer)
+            assert merged is not None
+            t0 = time.time()
+            pre_epochs = args.pretrain_epochs if args.pretrain_epochs > 0 else args.epochs
+            stats = train_pnnue_epoch_loop(
+                model,
+                merged,
+                device,
+                pre_epochs,
+                args.batch_size,
+                args.pretrain_lr,
+                args.seed,
+                weight_decay=args.weight_decay,
+                grad_clip=args.grad_clip,
+            )
+            export_pnnue_bin(model, champ_bin)
+            export_pnnue_bin(model, prod_bin)
+            torch.save({"model": model.state_dict(), "round": start_round - 1, "arch": active_arch}, ckpt_path)
+            diffs = verify_pnnue_parity(lib_path, model, champ_bin)
+            print(
+                f"[Pretrain V3:{rule_name}] {len(merged['boards'])} positions, {pre_epochs} epochs in "
+                f"{time.time() - t0:.1f}s | {stats} | parity={diffs}"
+            )
+
+        if not champ_bin.exists():
+            export_pnnue_bin(model, champ_bin)
+        if not prod_bin.exists():
+            export_pnnue_bin(model, prod_bin)
+
+        return {
+            "rule": rule_name,
+            "run_dir": rdir,
+            "phase": phase_name,
+            "prod_bin": prod_bin,
+            "champ_bin": champ_bin,
+            "cand_bin": cand_bin,
+            "ckpt_path": ckpt_path,
+            "buf_path": buf_path,
+            "active_arch": active_arch,
+            "model": model,
+            "round": start_round,
+        }
+
+    target_rules = ["renju", "freestyle"] if args.rule == "both" else [args.rule]
+    contexts = [_init_rule_context(rn) for rn in target_rules]
 
     arch_desc = (
         f"GPN2-3ch(3x{args.dim}->{args.v_h1}->{args.v_h2})+P"
-        if active_arch == "v4"
+        if contexts[0]["active_arch"] == "v4"
         else f"GPN1-22143x{args.dim}->V({args.v_hidden})+P"
     )
     print(
-        f"[Trainer {active_arch.upper()}] Device={device}, C_lib={lib_path}, "
+        f"[Trainer] Rule={args.rule}, Device={device}, C_lib={lib_path}, "
         f"Arch={arch_desc}, Batch={args.batch_size}, Rounds={'INF' if args.rounds <= 0 else args.rounds}"
     )
 
-    if pretrain_paths:
-        merged = None
-        for pre_path in pretrain_paths:
-            print(f"[Pretrain V3] Loading buffer: {pre_path}")
-            pre_data = load_npz_dataset(pre_path)
-            print(f"[Pretrain V3]   +{len(pre_data['boards'])} positions")
-            merged = merge_replay_buffer(buf_path, pre_data, args.max_buffer)
-        assert merged is not None
-        t0 = time.time()
-        pre_epochs = args.pretrain_epochs if args.pretrain_epochs > 0 else args.epochs
-        stats = train_pnnue_epoch_loop(
-            model,
-            merged,
-            device,
-            pre_epochs,
-            args.batch_size,
-            args.pretrain_lr,
-            args.seed,
-            weight_decay=args.weight_decay,
-            grad_clip=args.grad_clip,
-        )
-        export_pnnue_bin(model, champ_bin)
-        export_pnnue_bin(model, prod_bin)
-        torch.save({"model": model.state_dict(), "round": start_round - 1, "arch": active_arch}, ckpt_path)
-        diffs = verify_pnnue_parity(lib_path, model, champ_bin)
-        print(
-            f"[Pretrain V3] {len(merged['boards'])} positions, {pre_epochs} epochs in "
-            f"{time.time() - t0:.1f}s | {stats} | parity={diffs}"
-        )
-        if args.pretrain_only:
-            return
+    if args.pretrain_only:
+        return
 
-    if not champ_bin.exists():
-        export_pnnue_bin(model, champ_bin)
-    if not prod_bin.exists():
-        export_pnnue_bin(model, prod_bin)
+    def _run_one_round(ctx: Dict) -> None:
+        rule_name = ctx["rule"]
+        run_dir = ctx["run_dir"]
+        champ_bin = ctx["champ_bin"]
+        cand_bin = ctx["cand_bin"]
+        prod_bin = ctx["prod_bin"]
+        ckpt_path = ctx["ckpt_path"]
+        buf_path = ctx["buf_path"]
+        active_arch = ctx["active_arch"]
+        rnd = ctx["round"]
+        seed_base = args.seed + (50000000 if rule_name == "freestyle" else 0)
 
-    rnd = start_round
-    while args.rounds <= 0 or rnd < start_round + args.rounds:
         r_t0 = time.time()
-        print(f"\n================ V3 Round {rnd} ================")
+        print(f"\n================ V3/V4 [{rule_name.upper()}] Round {rnd} ================")
 
         t_gen = time.time()
         sp_data = generate_pnnue_games_parallel(
@@ -575,11 +642,12 @@ def main() -> None:
             time_limit=args.time_limit,
             random_opening_plies=2,
             explore_temp=0.45 if rnd <= 3 else 0.25,
-            seed=args.seed + rnd * 100003,
+            seed=seed_base + rnd * 100003,
+            rule=rule_name,
         )
         gen_sec = time.time() - t_gen
         new_pos = len(sp_data["boards"]) if sp_data else 0
-        print(f"[SelfPlay V3] {args.games_per_round} games -> {new_pos} pos in {gen_sec:.1f}s")
+        print(f"[SelfPlay {rule_name}] {args.games_per_round} games -> {new_pos} pos in {gen_sec:.1f}s")
 
         merged = merge_replay_buffer(buf_path, sp_data, args.max_buffer)
 
@@ -597,7 +665,8 @@ def main() -> None:
                 our_depth=args.sparring_depth,
                 vcf_depth=args.vcf_depth,
                 our_time=args.sparring_time,
-                seed=args.seed + rnd * 45197,
+                seed=seed_base + rnd * 45197,
+                rule=rule_name,
             )
             if v2_sp_data:
                 merged = merge_replay_buffer(buf_path, v2_sp_data, args.max_buffer)
@@ -614,7 +683,8 @@ def main() -> None:
                 time_ms=args.teacher_time_ms,
                 opening_plies=4,
                 output_path=dist_tmp,
-                seed=args.seed + rnd * 31337,
+                seed=seed_base + rnd * 31337,
+                rule=rule_name,
             )
             dist_data = load_npz_dataset(dist_tmp)
             merged = merge_replay_buffer(buf_path, dist_data, args.max_buffer)
@@ -634,13 +704,14 @@ def main() -> None:
                 vcf_depth=args.vcf_depth,
                 our_time=args.sparring_time,
                 teacher_time_ms=args.teacher_time_ms,
-                seed=args.seed + rnd * 65537,
+                seed=seed_base + rnd * 65537,
+                rule=rule_name,
             )
             if sp_rapfi_data:
                 merged = merge_replay_buffer(buf_path, sp_rapfi_data, args.max_buffer)
 
         t_trn = time.time()
-        cand_model = copy.deepcopy(model)
+        cand_model = copy.deepcopy(ctx["model"])
         trn_stats = train_pnnue_epoch_loop(
             cand_model,
             merged,
@@ -648,14 +719,14 @@ def main() -> None:
             args.epochs,
             args.batch_size,
             args.lr,
-            args.seed + rnd,
+            seed_base + rnd,
             weight_decay=args.weight_decay,
             grad_clip=args.grad_clip,
         )
         train_sec = time.time() - t_trn
         export_pnnue_bin(cand_model, cand_bin)
         diffs = verify_pnnue_parity(lib_path, cand_model, cand_bin)
-        print(f"[Train {active_arch.upper()}] {train_sec:.1f}s | {trn_stats} | parity={diffs}")
+        print(f"[Train {active_arch.upper()}:{rule_name}] {train_sec:.1f}s | {trn_stats} | parity={diffs}")
 
         t_ev = time.time()
         gate_champ = run_pnnue_arena_parallel(
@@ -673,11 +744,12 @@ def main() -> None:
             b_vcf=args.vcf_depth,
             b_time=args.eval_time,
             b_cnn_w=0.0,
-            seed=args.seed + rnd * 17,
+            seed=seed_base + rnd * 17,
+            rule=rule_name,
         )
         gate_ok = gate_champ["score"] >= args.gate_thresh and gate_champ["illegal"] == 0
         print(
-            f"[Gate V3 vs Champ] W={gate_champ['wins']} L={gate_champ['losses']} "
+            f"[Gate {rule_name} vs Champ] W={gate_champ['wins']} L={gate_champ['losses']} "
             f"D={gate_champ['draws']} score={gate_champ['score']:.3f} -> "
             f"{'CHECK_ANCHOR' if gate_ok else 'ROLLBACK'}"
         )
@@ -701,21 +773,22 @@ def main() -> None:
                 b_vcf=args.vcf_depth,
                 b_time=args.eval_time,
                 b_cnn_w=0.0,
-                seed=args.seed + rnd * 29,
+                seed=seed_base + rnd * 29,
+                rule=rule_name,
             )
             cand_gate_heur = round(cand_vs_heur["score"], 4)
             anchor_ok = cand_vs_heur["score"] >= args.min_heur_score and cand_vs_heur["illegal"] == 0
             print(
-                f"[Gate Anchor vs Heuristic] W={cand_vs_heur['wins']} L={cand_vs_heur['losses']} "
+                f"[Gate Anchor {rule_name} vs Heuristic] W={cand_vs_heur['wins']} L={cand_vs_heur['losses']} "
                 f"D={cand_vs_heur['draws']} score={cand_vs_heur['score']:.3f} "
                 f"(min={args.min_heur_score:.3f}) -> {'PROMOTED' if anchor_ok else 'REJECTED'}"
             )
             if anchor_ok:
                 promoted = True
-                model = cand_model
-                export_pnnue_bin(model, champ_bin)
-                export_pnnue_bin(model, prod_bin)
-                torch.save({"model": model.state_dict(), "round": rnd, "arch": active_arch}, ckpt_path)
+                ctx["model"] = cand_model
+                export_pnnue_bin(cand_model, champ_bin)
+                export_pnnue_bin(cand_model, prod_bin)
+                torch.save({"model": cand_model.state_dict(), "round": rnd, "arch": active_arch}, ckpt_path)
                 vs_heur = cand_vs_heur
 
         eval_target = champ_bin
@@ -735,7 +808,8 @@ def main() -> None:
                 b_vcf=args.vcf_depth,
                 b_time=args.eval_time,
                 b_cnn_w=0.0,
-                seed=args.seed + rnd * 29,
+                seed=seed_base + rnd * 29,
+                rule=rule_name,
             )
         vs_v2 = None
         if v2_nnue_bin.exists() or v2_cnn_bin.exists():
@@ -754,13 +828,15 @@ def main() -> None:
                 b_vcf=args.vcf_depth,
                 b_time=args.eval_time,
                 b_cnn_w=0.35,
-                seed=args.seed + rnd * 41,
+                seed=seed_base + rnd * 41,
+                rule=rule_name,
             )
         eval_sec = time.time() - t_ev
         total_sec = time.time() - r_t0
 
         record = {
-            "phase": "v3_pnnue",
+            "phase": ctx["phase"],
+            "rule": rule_name,
             "arch": active_arch,
             "round": rnd,
             "depth": args.depth,
@@ -787,10 +863,17 @@ def main() -> None:
         }
         append_metrics(metrics_path, record)
         print(
-            f"[Round {rnd} Done] total={total_sec:.1f}s | vs_heuristic={vs_heur['score']:.3f} | "
+            f"[Round {rnd} ({rule_name}) Done] total={total_sec:.1f}s | "
+            f"vs_heuristic={vs_heur['score']:.3f} | "
             + (f"vs_v2={vs_v2['score']:.3f}" if vs_v2 else "vs_v2=N/A")
         )
-        rnd += 1
+        ctx["round"] = rnd + 1
+
+    cycle = 0
+    while args.rounds <= 0 or cycle < args.rounds:
+        for ctx in contexts:
+            _run_one_round(ctx)
+        cycle += 1
 
 
 if __name__ == "__main__":

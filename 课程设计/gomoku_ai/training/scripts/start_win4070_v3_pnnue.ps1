@@ -1,7 +1,8 @@
 param(
     [int]$Rounds = 0,
     [int]$GamesPerRound = 320,
-    [int]$Workers = 16,
+    [int]$Workers = 10,
+    [string]$Rule = "renju",
     [int]$Depth = 6,
     [int]$VcfDepth = 14,
     [double]$TimeLimit = 0.6,
@@ -68,6 +69,7 @@ $RepErr   = Join-Path $ProjectDir "training\runs_v3\reporter_v3_win4070.err.log"
 
 $TrainArgs = @(
     "-u", "training\train_pnnue.py",
+    "--rule", "$Rule",
     "--rounds", "$Rounds",
     "--games-per-round", "$GamesPerRound",
     "--workers", "$Workers",
@@ -138,12 +140,13 @@ if ($Resume) {
     $TrainArgs += "--resume"
 }
 
+$ReporterPhase = if ($Rule -eq "freestyle") { "v3_freestyle" } elseif ($Rule -eq "both") { "v3_dual" } else { "v3_pnnue" }
 $RepArgs = @(
     "-u", "training\gomoku_reporter.py",
     "--monitor", "$MonitorUrl",
     "--machine", "windows-4070",
     "--run", "$RunName",
-    "--phase", "v3_pnnue",
+    "--phase", "$ReporterPhase",
     "--project-dir", "$ProjectDir",
     "--log-file", "$TrainLog",
     "--interval", "3"

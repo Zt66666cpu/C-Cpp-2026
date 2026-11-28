@@ -2,6 +2,7 @@
 #define GOMOKU_SEARCH_H
 
 #include "board.h"
+#include "rules.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -19,6 +20,7 @@ typedef struct {
     float cnn_value_weight;
     float temperature;
     uint64_t seed;
+    GameRule rule;
 } SearchConfig;
 
 typedef struct {
@@ -70,12 +72,31 @@ int search_generate_candidates(
     int max_moves
 );
 
+int search_generate_candidates_ex(
+    Board *board,
+    Cell player,
+    int radius,
+    GameRule rule,
+    Move *out_moves,
+    int max_moves
+);
+
 /* VCF（连续冲四必杀）搜索：若存在必胜连冲四路径，返回 true 并输出首步 */
 bool search_find_vcf(
     Board *board,
     Cell attacker,
     int max_depth,
     double time_limit_sec,
+    Move *win_move,
+    uint64_t *out_nodes
+);
+
+bool search_find_vcf_ex(
+    Board *board,
+    Cell attacker,
+    int max_depth,
+    double time_limit_sec,
+    GameRule rule,
     Move *win_move,
     uint64_t *out_nodes
 );

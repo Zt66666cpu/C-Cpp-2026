@@ -33,9 +33,15 @@ def _worker_distill(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int]:
         time_ms,
         opening_plies,
         base_seed,
+        rule,
     ) = args
 
+    freestyle = str(rule).strip().lower() in ("freestyle", "free", "1")
+    rapfi_rule = 0 if freestyle else 4
+
     lib = _bind_lib(Path(lib_path_str))
+    if hasattr(lib, "gomoku_set_rule"):
+        lib.gomoku_set_rule(1 if freestyle else 0)
     rng = np.random.default_rng(base_seed)
 
     boards_list: List[np.ndarray] = []
@@ -50,14 +56,14 @@ def _worker_distill(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int]:
     draws = 0
 
     with RapfiClient(Path(rapfi_bin_str)) as teacher_b, RapfiClient(Path(rapfi_bin_str)) as teacher_w:
-        teacher_b.start_game(rule=4, timeout_turn_ms=time_ms, max_memory_mb=192, threads=1)
-        teacher_w.start_game(rule=4, timeout_turn_ms=time_ms, max_memory_mb=192, threads=1)
+        teacher_b.start_game(rule=rapfi_rule, timeout_turn_ms=time_ms, max_memory_mb=192, threads=1)
+        teacher_w.start_game(rule=rapfi_rule, timeout_turn_ms=time_ms, max_memory_mb=192, threads=1)
 
         for g in range(num_games):
             if g > 0:
                 for client in (teacher_b, teacher_w):
                     client.restart_board()
-                    client._send("INFO rule 4")
+                    client._send(f"INFO rule {rapfi_rule}")
                     client._send(f"INFO timeout_turn {time_ms}")
                     client._send("INFO thread_num 1")
 
@@ -86,7 +92,9 @@ def _worker_distill(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int]:
                 cand_pool = [
                     idx
                     for idx in (near if near else legal.tolist())
-                    if not _is_five_in_row(board, idx // BOARD_SIZE, idx % BOARD_SIZE, cur_p)
+                    if not _is_five_in_row(
+                        board, idx // BOARD_SIZE, idx % BOARD_SIZE, cur_p, freestyle=freestyle
+                    )
                 ]
                 pool = cand_pool if cand_pool else (near if near else legal.tolist())
                 pick = int(rng.choice(pool))
@@ -109,12 +117,17 @@ def _worker_distill(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int]:
                 r, c, tval = client.play_board(moves_hist, player)
 
                 idx = r * BOARD_SIZE + c
-                if idx < 0 or idx >= BOARD_CELLS or board[idx] != 0 or (player == 1 and forb[idx] != 0):
+                if (
+                    idx < 0
+                    or idx >= BOARD_CELLS
+                    or board[idx] != 0
+                    or (not freestyle and player == 1 and forb[idx] != 0)
+                ):
                     winner = 2 if player == 1 else 1
                     break
 
-                # 白方无禁手：策略软标签只按空位约束；黑方额外排除禁手点
-                forb_for_pol = forb if player == 1 else np.zeros_like(forb)
+                # 白方或无禁手模式下，策略软标签只按空位约束；连珠黑方额外排除禁手点
+                forb_for_pol = forb if (not freestyle and player == 1) else np.zeros_like(forb)
                 g_boards.append(board.copy().reshape(BOARD_SIZE, BOARD_SIZE))
                 g_players.append(player)
                 g_forb.append(forb.copy())
@@ -125,7 +138,7 @@ def _worker_distill(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, int, int]:
                 moves_hist.append((r, c, player))
 
                 b2d = board.reshape(BOARD_SIZE, BOARD_SIZE)
-                if _is_five_in_row(b2d, r, c, player):
+                if _is_five_in_row(b2d, r, c, player, freestyle=freestyle):
                     winner = player
                     break
                 if ply + 1 >= BOARD_CELLS:
@@ -175,7 +188,9 @@ def distill_rapfi_games(
     opening_plies: int,
     output_path: Path,
     seed: int = 202611,
+    rule: str = "renju",
 ) -> Path:
+    rule_norm = "freestyle" if str(rule).strip().lower() in ("freestyle", "free", "1") else "renju"
     lib_path = find_engine_lib(PROJECT_ROOT)
     eff_workers = max(1, min(workers, games))
     per_w = [games // eff_workers] * eff_workers
@@ -185,7 +200,7 @@ def distill_rapfi_games(
     tasks = []
     cur_seed = seed
     for wg in per_w:
-        tasks.append((str(lib_path), str(teacher_bin), wg, time_ms, opening_plies, cur_seed))
+        tasks.append((str(lib_path), str(teacher_bin), wg, time_ms, opening_plies, cur_seed, rule_norm))
         cur_seed += wg * 1009
 
     t0 = time.time()
@@ -219,13 +234,14 @@ def distill_rapfi_games(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Offline Rapfi Renju distillation dataset generator")
+    parser = argparse.ArgumentParser(description="Offline Rapfi distillation dataset generator")
     parser.add_argument("--teacher-bin", type=str, default="")
     parser.add_argument("--games", type=int, default=400)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--time-ms", type=int, default=60)
     parser.add_argument("--opening-plies", type=int, default=3)
     parser.add_argument("--output", type=str, default="training/runs/rapfi_distill.npz")
+    parser.add_argument("--rule", type=str, default="renju", choices=("renju", "freestyle"))
     parser.add_argument("--seed", type=int, default=202611)
     args = parser.parse_args()
 
@@ -245,6 +261,7 @@ def main() -> None:
         opening_plies=args.opening_plies,
         output_path=out,
         seed=args.seed,
+        rule=args.rule,
     )
 
 

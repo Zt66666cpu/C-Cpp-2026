@@ -266,11 +266,12 @@ static ForbiddenReason detect_black_forbidden(
     return FORBIDDEN_NONE;
 }
 
-MoveOutcome rules_apply_move(
+MoveOutcome rules_apply_move_ex(
     Board *board,
     int row,
     int col,
-    Cell player
+    Cell player,
+    GameRule rule
 ) {
     MoveOutcome outcome = {
         .result = MOVE_INVALID,
@@ -278,6 +279,19 @@ MoveOutcome rules_apply_move(
     };
 
     if (!board_place(board, row, col, player)) {
+        return outcome;
+    }
+
+    if (rule == RULE_FREESTYLE) {
+        if (has_run_at_least(board, row, col, player, 5)) {
+            outcome.result = (player == CELL_BLACK) ? MOVE_BLACK_WIN : MOVE_WHITE_WIN;
+            return outcome;
+        }
+        if (board_is_full(board)) {
+            outcome.result = MOVE_DRAW;
+            return outcome;
+        }
+        outcome.result = MOVE_OK;
         return outcome;
     }
 
@@ -309,23 +323,49 @@ MoveOutcome rules_apply_move(
     return outcome;
 }
 
-bool rules_is_winning_move(Board *board, int row, int col, Cell player) {
+MoveOutcome rules_apply_move(
+    Board *board,
+    int row,
+    int col,
+    Cell player
+) {
+    return rules_apply_move_ex(board, row, col, player, RULE_RENJU);
+}
+
+bool rules_is_winning_move_ex(
+    Board *board,
+    int row,
+    int col,
+    Cell player,
+    GameRule rule
+) {
     if ((player != CELL_BLACK && player != CELL_WHITE)
         || !board_is_empty(board, row, col)) {
         return false;
     }
 
     board->cells[row][col] = player;
-    bool wins = (player == CELL_BLACK)
-        ? has_exact_five(board, row, col, CELL_BLACK)
-        : has_run_at_least(board, row, col, CELL_WHITE, 5);
+    bool wins = (rule == RULE_FREESTYLE)
+        ? has_run_at_least(board, row, col, player, 5)
+        : ((player == CELL_BLACK)
+            ? has_exact_five(board, row, col, CELL_BLACK)
+            : has_run_at_least(board, row, col, CELL_WHITE, 5));
     board->cells[row][col] = CELL_EMPTY;
 
     return wins;
 }
 
-ForbiddenReason rules_check_black_forbidden(Board *board, int row, int col) {
-    if (!board_is_empty(board, row, col)) {
+bool rules_is_winning_move(Board *board, int row, int col, Cell player) {
+    return rules_is_winning_move_ex(board, row, col, player, RULE_RENJU);
+}
+
+ForbiddenReason rules_check_black_forbidden_ex(
+    Board *board,
+    int row,
+    int col,
+    GameRule rule
+) {
+    if (rule == RULE_FREESTYLE || !board_is_empty(board, row, col)) {
         return FORBIDDEN_NONE;
     }
 
@@ -339,17 +379,31 @@ ForbiddenReason rules_check_black_forbidden(Board *board, int row, int col) {
     return reason;
 }
 
-bool rules_is_legal_move(Board *board, int row, int col, Cell player) {
+ForbiddenReason rules_check_black_forbidden(Board *board, int row, int col) {
+    return rules_check_black_forbidden_ex(board, row, col, RULE_RENJU);
+}
+
+bool rules_is_legal_move_ex(
+    Board *board,
+    int row,
+    int col,
+    Cell player,
+    GameRule rule
+) {
     if ((player != CELL_BLACK && player != CELL_WHITE)
         || !board_is_empty(board, row, col)) {
         return false;
     }
 
-    if (player == CELL_BLACK) {
-        return rules_check_black_forbidden(board, row, col) == FORBIDDEN_NONE;
+    if (rule == RULE_RENJU && player == CELL_BLACK) {
+        return rules_check_black_forbidden_ex(board, row, col, rule) == FORBIDDEN_NONE;
     }
 
     return true;
+}
+
+bool rules_is_legal_move(Board *board, int row, int col, Cell player) {
+    return rules_is_legal_move_ex(board, row, col, player, RULE_RENJU);
 }
 
 const char *rules_forbidden_reason_name(ForbiddenReason reason) {
@@ -364,4 +418,8 @@ const char *rules_forbidden_reason_name(ForbiddenReason reason) {
         default:
             return "none";
     }
+}
+
+const char *rules_name(GameRule rule) {
+    return (rule == RULE_FREESTYLE) ? "freestyle" : "renju";
 }

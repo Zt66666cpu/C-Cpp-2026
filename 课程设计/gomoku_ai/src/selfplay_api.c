@@ -16,6 +16,16 @@ typedef struct {
     CnnModel *cnn;
 } ModelBundle;
 
+static GameRule g_active_rule = RULE_RENJU;
+
+void gomoku_set_rule(int rule) {
+    g_active_rule = (rule == 0) ? RULE_RENJU : RULE_FREESTYLE;
+}
+
+int gomoku_get_rule(void) {
+    return (int)g_active_rule;
+}
+
 static uint64_t next_rng(uint64_t *state) {
     uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
     z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -35,9 +45,10 @@ static void record_board_snapshot(
         for (int c = 0; c < BOARD_SIZE; ++c) {
             int idx = r * BOARD_SIZE + c;
             dst_board[idx] = (uint8_t)board->cells[r][c];
-            if (player == CELL_BLACK && board->cells[r][c] == CELL_EMPTY) {
+            if (g_active_rule == RULE_RENJU && player == CELL_BLACK
+                && board->cells[r][c] == CELL_EMPTY) {
                 dst_forbidden[idx] =
-                    (rules_check_black_forbidden(board, r, c) != FORBIDDEN_NONE)
+                    (rules_check_black_forbidden_ex(board, r, c, g_active_rule) != FORBIDDEN_NONE)
                     ? 1U : 0U;
             } else {
                 dst_forbidden[idx] = 0U;
@@ -63,7 +74,7 @@ static bool apply_random_opening_move(
         int dc = (int)(next_rng(rng) % 5ULL) - 2;
         int r = 7 + dr;
         int c = 7 + dc;
-        if (rules_apply_move(board, r, c, player).result == MOVE_OK) {
+        if (rules_apply_move_ex(board, r, c, player, g_active_rule).result == MOVE_OK) {
             out_move->row = r;
             out_move->col = c;
             return true;
@@ -71,13 +82,13 @@ static bool apply_random_opening_move(
     }
 
     Move cands[32];
-    int n = search_generate_candidates(board, player, 2, cands, 16);
+    int n = search_generate_candidates_ex(board, player, 2, g_active_rule, cands, 16);
     if (n <= 0) {
         return false;
     }
     int pick = (int)(next_rng(rng) % (uint64_t)n);
     Move m = cands[pick];
-    MoveOutcome out = rules_apply_move(board, m.row, m.col, player);
+    MoveOutcome out = rules_apply_move_ex(board, m.row, m.col, player, g_active_rule);
     if (out.result != MOVE_OK) {
         return false;
     }
@@ -164,6 +175,7 @@ int gomoku_generate_game(
         cfg.cnn_value_weight = cnn_value_weight;
         cfg.temperature = (steps < explore_plies) ? explore_temp : 0.05f;
         cfg.seed = next_rng(&rng);
+        cfg.rule = g_active_rule;
 
         record_board_snapshot(
             &board,
@@ -199,8 +211,8 @@ int gomoku_generate_game(
             out_search_values[steps] = tanhf((float)res.stats.score / 25000.0f);
         }
 
-        MoveOutcome outcome = rules_apply_move(
-            &board, res.best_move.row, res.best_move.col, player
+        MoveOutcome outcome = rules_apply_move_ex(
+            &board, res.best_move.row, res.best_move.col, player, g_active_rule
         );
         ++steps;
 
@@ -282,10 +294,10 @@ int gomoku_run_match(
         Board board;
         board_init(&board);
         /* 成对对称开局：先落天元 (7,7)，白第 2 手按 pair_idx 选点 */
-        rules_apply_move(&board, 7, 7, CELL_BLACK);
+        rules_apply_move_ex(&board, 7, 7, CELL_BLACK, g_active_rule);
         int off_idx = (pair_idx + (int)(seed % 16ULL)) % 16;
         Move m2 = {7 + OPEN_OFFSETS[off_idx][0], 7 + OPEN_OFFSETS[off_idx][1]};
-        rules_apply_move(&board, m2.row, m2.col, CELL_WHITE);
+        rules_apply_move_ex(&board, m2.row, m2.col, CELL_WHITE, g_active_rule);
 
         Cell player = CELL_BLACK;
         Move last_move = m2;
@@ -311,6 +323,7 @@ int gomoku_run_match(
             cfg.use_cnn = (cnn != NULL);
             cfg.temperature = 0.0f;
             cfg.seed = next_rng(&rng);
+            cfg.rule = g_active_rule;
 
             SearchResult res = search_find_best_move(
                 &board, player, last_move, &cfg, nnue, cnn
@@ -330,8 +343,8 @@ int gomoku_run_match(
                 break;
             }
 
-            MoveOutcome outcome = rules_apply_move(
-                &board, res.best_move.row, res.best_move.col, player
+            MoveOutcome outcome = rules_apply_move_ex(
+                &board, res.best_move.row, res.best_move.col, player, g_active_rule
             );
             if (outcome.result == MOVE_INVALID) {
                 ++out_stats->illegal_moves;
@@ -411,7 +424,7 @@ int gomoku_eval_nn_debug(
     }
 
     float cnn_in[BOARD_CELLS * CNN_INPUT_CHANNELS];
-    nn_build_cnn_input(&board, side, last_move, cnn_in);
+    nn_build_cnn_input_ex(&board, side, last_move, g_active_rule, cnn_in);
     if (out_cnn_input_hwc) {
         memcpy(out_cnn_input_hwc, cnn_in, sizeof(cnn_in));
     }
@@ -454,9 +467,11 @@ int gomoku_extract_state(
         for (int r = 0; r < BOARD_SIZE; ++r) {
             for (int c = 0; c < BOARD_SIZE; ++c) {
                 int idx = r * BOARD_SIZE + c;
-                if (side == CELL_BLACK && board.cells[r][c] == CELL_EMPTY) {
+                if (g_active_rule == RULE_RENJU && side == CELL_BLACK
+                    && board.cells[r][c] == CELL_EMPTY) {
                     out_forbidden[idx] =
-                        (rules_check_black_forbidden(&board, r, c) != FORBIDDEN_NONE)
+                        (rules_check_black_forbidden_ex(&board, r, c, g_active_rule)
+                         != FORBIDDEN_NONE)
                         ? 1U : 0U;
                 } else {
                     out_forbidden[idx] = 0U;
@@ -522,6 +537,7 @@ int gomoku_step_search(
     cfg.cnn_value_weight = cnn_value_weight;
     cfg.temperature = explore_temp;
     cfg.seed = seed ? seed : 0x123456789ABCDEF0ULL;
+    cfg.rule = g_active_rule;
 
     SearchResult res = search_find_best_move(
         &board, side, last_move, &cfg, nnue, cnn
@@ -644,6 +660,7 @@ int gomoku_step_search_pnnue(
     cfg.use_cnn = false;
     cfg.temperature = explore_temp;
     cfg.seed = seed ? seed : 0x123456789ABCDEF0ULL;
+    cfg.rule = g_active_rule;
 
     SearchResult res = pnnue
         ? search_find_best_move_pnnue(&board, side, last_move, &cfg, pnnue)
@@ -717,6 +734,7 @@ int gomoku_generate_game_pnnue(
         cfg.use_cnn = false;
         cfg.temperature = (steps < 8) ? explore_temp : 0.0f;
         cfg.seed = next_rng(&rng);
+        cfg.rule = g_active_rule;
 
         SearchResult res = pnnue
             ? search_find_best_move_pnnue(&board, player, last_move, &cfg, pnnue)
@@ -732,9 +750,11 @@ int gomoku_generate_game_pnnue(
             for (int c = 0; c < BOARD_SIZE; ++c) {
                 int idx = r * BOARD_SIZE + c;
                 dst_board[idx] = (uint8_t)board.cells[r][c];
-                if (player == CELL_BLACK && board.cells[r][c] == CELL_EMPTY) {
+                if (g_active_rule == RULE_RENJU && player == CELL_BLACK
+                    && board.cells[r][c] == CELL_EMPTY) {
                     dst_forb[idx] =
-                        (rules_check_black_forbidden(&board, r, c) != FORBIDDEN_NONE)
+                        (rules_check_black_forbidden_ex(&board, r, c, g_active_rule)
+                         != FORBIDDEN_NONE)
                         ? 1U : 0U;
                 } else {
                     dst_forb[idx] = 0U;
@@ -755,8 +775,8 @@ int gomoku_generate_game_pnnue(
         out_values[steps] = val_norm;
         ++steps;
 
-        MoveOutcome outcome = rules_apply_move(
-            &board, res.best_move.row, res.best_move.col, player
+        MoveOutcome outcome = rules_apply_move_ex(
+            &board, res.best_move.row, res.best_move.col, player, g_active_rule
         );
         if (outcome.result == MOVE_INVALID) {
             winner = board_opponent(player);
@@ -835,10 +855,10 @@ int gomoku_run_match_pnnue(
 
         Board board;
         board_init(&board);
-        rules_apply_move(&board, 7, 7, CELL_BLACK);
+        rules_apply_move_ex(&board, 7, 7, CELL_BLACK, g_active_rule);
         int off2 = (pair_idx + (int)(seed % 16ULL)) % 16;
         Move m2 = {7 + OPEN_OFFSETS[off2][0], 7 + OPEN_OFFSETS[off2][1]};
-        rules_apply_move(&board, m2.row, m2.col, CELL_WHITE);
+        rules_apply_move_ex(&board, m2.row, m2.col, CELL_WHITE, g_active_rule);
 
         Move last_move = m2;
         Cell player = CELL_BLACK;
@@ -849,8 +869,8 @@ int gomoku_run_match_pnnue(
             int idx3 = (m3_base + t) % 4;
             Move m3 = {7 + OPEN_M3[idx3][0], 7 + OPEN_M3[idx3][1]};
             if (m3.row == m2.row && m3.col == m2.col) continue;
-            if (rules_is_legal_move(&board, m3.row, m3.col, CELL_BLACK)) {
-                rules_apply_move(&board, m3.row, m3.col, CELL_BLACK);
+            if (rules_is_legal_move_ex(&board, m3.row, m3.col, CELL_BLACK, g_active_rule)) {
+                rules_apply_move_ex(&board, m3.row, m3.col, CELL_BLACK, g_active_rule);
                 last_move = m3;
                 player = CELL_WHITE;
                 start_ply = 3;
@@ -866,6 +886,7 @@ int gomoku_run_match_pnnue(
             SearchConfig cfg = search_default_config();
             cfg.temperature = 0.0f;
             cfg.seed = next_rng(&rng);
+            cfg.rule = g_active_rule;
 
             SearchResult res;
             if (turn_a) {
@@ -905,8 +926,8 @@ int gomoku_run_match_pnnue(
                 break;
             }
 
-            MoveOutcome outcome = rules_apply_move(
-                &board, res.best_move.row, res.best_move.col, player
+            MoveOutcome outcome = rules_apply_move_ex(
+                &board, res.best_move.row, res.best_move.col, player, g_active_rule
             );
             if (outcome.result == MOVE_INVALID) {
                 ++out_stats->illegal_moves;

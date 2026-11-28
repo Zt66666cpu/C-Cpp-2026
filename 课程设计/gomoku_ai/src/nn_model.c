@@ -283,10 +283,11 @@ void cnn_free(CnnModel *model) {
     free(model);
 }
 
-void nn_build_cnn_input(
+void nn_build_cnn_input_ex(
     Board *board,
     Cell side_to_move,
     Move last_move,
+    GameRule rule,
     float *out_hwc
 ) {
     Cell my = (side_to_move == CELL_BLACK || side_to_move == CELL_WHITE)
@@ -295,7 +296,7 @@ void nn_build_cnn_input(
     Cell opp = board_opponent(my);
 
     int black_count = 0;
-    if (my == CELL_BLACK) {
+    if (rule == RULE_RENJU && my == CELL_BLACK) {
         for (int r = 0; r < BOARD_SIZE; ++r) {
             for (int c = 0; c < BOARD_SIZE; ++c) {
                 if (board->cells[r][c] == CELL_BLACK) {
@@ -305,7 +306,7 @@ void nn_build_cnn_input(
         }
     }
 
-    bool check_forbidden = (my == CELL_BLACK && black_count >= 4);
+    bool check_forbidden = (rule == RULE_RENJU && my == CELL_BLACK && black_count >= 4);
     float is_black_plane = (my == CELL_BLACK) ? 1.0f : 0.0f;
 
     for (int r = 0; r < BOARD_SIZE; ++r) {
@@ -319,11 +320,20 @@ void nn_build_cnn_input(
             p[4] = is_black_plane;
             p[5] = (check_forbidden
                     && cell == CELL_EMPTY
-                    && rules_check_black_forbidden(board, r, c) != FORBIDDEN_NONE)
+                    && rules_check_black_forbidden_ex(board, r, c, rule) != FORBIDDEN_NONE)
                 ? 1.0f
                 : 0.0f;
         }
     }
+}
+
+void nn_build_cnn_input(
+    Board *board,
+    Cell side_to_move,
+    Move last_move,
+    float *out_hwc
+) {
+    nn_build_cnn_input_ex(board, side_to_move, last_move, RULE_RENJU, out_hwc);
 }
 
 static void im2col_3x3_hwc(

@@ -53,13 +53,16 @@ def _read_jsonl(metrics_path: Path, phase: str) -> list[dict[str, Any]]:
         if not isinstance(raw, dict):
             continue
         row_phase = str(raw.get("phase") or "v1")
-        if row_phase == phase:
+        if phase == "v3_dual":
+            if row_phase in ("v3_pnnue", "v3_freestyle"):
+                rows.append(raw)
+        elif row_phase == phase:
             rows.append(raw)
     return rows
 
 
 def _is_v3(phase: str) -> bool:
-    return phase.startswith("v3")
+    return phase.startswith(("v3", "v4"))
 
 
 def _parse_cli_args(command: str) -> dict[str, Any]:
@@ -226,7 +229,8 @@ def _build_payload(
                 {
                     "iter": rnd,
                     "round": rnd,
-                    "phase": phase,
+                    "phase": str(raw.get("phase") or phase),
+                    "rule": str(raw.get("rule") or ("freestyle" if raw.get("phase") == "v3_freestyle" else "renju")),
                     "train_loss": float(raw.get("train_loss") or raw.get("val_loss") or 0.0),
                     "val_loss": float(raw.get("val_loss") or 0.0),
                     "lr": float(raw.get("lr") or base_lr),

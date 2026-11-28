@@ -447,6 +447,80 @@ static void test_pnnue_incremental_equivalence(void) {
     pnnue_free(model);
 }
 
+static void test_search_freestyle_vs_renju_rules(void) {
+    /* 1. 长连局面：黑已有 (7,1)..(7,5) 五子连成，在 (7,6) 落子将形成六连；
+          同时白存在无关子，验证相同棋盘连续切换 rule 时 PNNUE 持久化 TT 互不串扰 */
+    Board board;
+    board_init(&board);
+    board.cells[7][0] = CELL_WHITE; /* 封死左端 (7,0)，使 (7,6) 成为唯一六连长连点 */
+    board.cells[7][1] = CELL_BLACK;
+    board.cells[7][2] = CELL_BLACK;
+    board.cells[7][3] = CELL_BLACK;
+    board.cells[7][4] = CELL_BLACK;
+    board.cells[7][5] = CELL_BLACK;
+    board.cells[10][10] = CELL_WHITE;
+    board.cells[10][11] = CELL_WHITE;
+
+    pnnue_init_tables();
+    PatternNnueModel *model = (PatternNnueModel *)calloc(1, sizeof(PatternNnueModel));
+    CHECK(model != NULL);
+    model->num_canon = PNNUE_NUM_CANON;
+    model->dim = 8;
+    model->v_hidden = 4;
+    model->emb = (float *)calloc((size_t)model->num_canon * model->dim, sizeof(float));
+    CHECK(model->emb != NULL);
+
+    SearchConfig cfg_renju = search_default_config();
+    cfg_renju.max_depth = 3;
+    cfg_renju.time_limit_sec = 1.0;
+    cfg_renju.rule = RULE_RENJU;
+
+    SearchConfig cfg_free = cfg_renju;
+    cfg_free.rule = RULE_FREESTYLE;
+
+    Move last = {10, 11};
+    SearchResult r_v2_renju = search_find_best_move(&board, CELL_BLACK, last, &cfg_renju, NULL, NULL);
+    CHECK(r_v2_renju.valid);
+    CHECK(!(r_v2_renju.best_move.row == 7 && r_v2_renju.best_move.col == 6));
+
+    SearchResult r_v2_free = search_find_best_move(&board, CELL_BLACK, last, &cfg_free, NULL, NULL);
+    CHECK(r_v2_free.valid);
+    CHECK(r_v2_free.best_move.row == 7 && r_v2_free.best_move.col == 6);
+
+    SearchResult r_p_renju = search_find_best_move_pnnue(&board, CELL_BLACK, last, &cfg_renju, model);
+    CHECK(r_p_renju.valid);
+    CHECK(!(r_p_renju.best_move.row == 7 && r_p_renju.best_move.col == 6));
+
+    SearchResult r_p_free = search_find_best_move_pnnue(&board, CELL_BLACK, last, &cfg_free, model);
+    CHECK(r_p_free.valid);
+    CHECK(r_p_free.best_move.row == 7 && r_p_free.best_move.col == 6);
+
+    /* 2. 双四 VCF：无禁手下黑方可凭双四 (7,7) 杀棋，有禁手下禁用该点 */
+    Board b_d4;
+    board_init(&b_d4);
+    b_d4.cells[7][5] = CELL_BLACK;
+    b_d4.cells[7][6] = CELL_BLACK;
+    b_d4.cells[7][8] = CELL_BLACK;
+    b_d4.cells[5][7] = CELL_BLACK;
+    b_d4.cells[6][7] = CELL_BLACK;
+    b_d4.cells[8][7] = CELL_BLACK;
+    b_d4.cells[3][3] = CELL_WHITE;
+    b_d4.cells[3][4] = CELL_WHITE;
+
+    Move vcf_m = {-1, -1};
+    uint64_t vcf_nodes = 0;
+    bool f_renju = search_find_vcf_ex(&b_d4, CELL_BLACK, 6, 1.0, RULE_RENJU, &vcf_m, &vcf_nodes);
+    if (f_renju) {
+        CHECK(!(vcf_m.row == 7 && vcf_m.col == 7));
+    }
+    Move vcf_free_m = {-1, -1};
+    bool f_free = search_find_vcf_ex(&b_d4, CELL_BLACK, 6, 1.0, RULE_FREESTYLE, &vcf_free_m, &vcf_nodes);
+    CHECK(f_free);
+    CHECK(vcf_free_m.row == 7 && vcf_free_m.col == 7);
+
+    pnnue_free(model);
+}
+
 int main(void) {
     test_board_undo_and_rule_probes();
     test_search_immediate_win();
@@ -463,6 +537,7 @@ int main(void) {
     test_eval_broken_four_and_jump_three();
     test_jump_three_defense_and_cnn_smoke();
     test_pnnue_incremental_equivalence();
+    test_search_freestyle_vs_renju_rules();
 
     if (failures != 0) {
         fprintf(stderr, "%d AI test(s) failed.\n", failures);

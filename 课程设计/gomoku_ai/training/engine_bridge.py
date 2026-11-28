@@ -62,6 +62,14 @@ def _bind_lib(lib_path: Path) -> ctypes.CDLL:
             pass
     lib = ctypes.CDLL(str(lib_path))
 
+    if hasattr(lib, "gomoku_set_rule"):
+        lib.gomoku_set_rule.argtypes = [ctypes.c_int]
+        lib.gomoku_set_rule.restype = None
+
+    if hasattr(lib, "gomoku_get_rule"):
+        lib.gomoku_get_rule.argtypes = []
+        lib.gomoku_get_rule.restype = ctypes.c_int
+
     lib.gomoku_load_models.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
     lib.gomoku_load_models.restype = ctypes.c_void_p
 
@@ -764,6 +772,14 @@ def verify_pnnue_parity(
         return _run_with_path(tmp_bin)
 
 
+def normalize_rule(rule: str) -> str:
+    return "freestyle" if str(rule or "renju").strip().lower() in ("freestyle", "free", "1") else "renju"
+
+
+def rule_to_int(rule: str) -> int:
+    return 1 if normalize_rule(rule) == "freestyle" else 0
+
+
 def _worker_generate_pnnue_games(args: Tuple) -> Dict[str, np.ndarray]:
     (
         lib_path_str,
@@ -775,9 +791,12 @@ def _worker_generate_pnnue_games(args: Tuple) -> Dict[str, np.ndarray]:
         open_plies_base,
         explore_temp,
         base_seed,
+        rule,
     ) = args
 
     lib = _bind_lib(Path(lib_path_str))
+    if hasattr(lib, "gomoku_set_rule"):
+        lib.gomoku_set_rule(rule_to_int(rule))
     handle = lib.gomoku_load_pnnue(pnnue_path_str.encode("utf-8")) if pnnue_path_str else None
 
     all_boards: List[np.ndarray] = []
@@ -848,8 +867,10 @@ def generate_pnnue_games_parallel(
     random_opening_plies: int,
     explore_temp: float,
     seed: int,
+    rule: str = "renju",
 ) -> Dict[str, np.ndarray]:
     p_str = str(pnnue_path) if (pnnue_path and Path(pnnue_path).exists()) else ""
+    rule_norm = normalize_rule(rule)
     eff_workers = max(1, min(workers, num_games))
     per_worker = [num_games // eff_workers] * eff_workers
     for i in range(num_games % eff_workers):
@@ -868,6 +889,7 @@ def generate_pnnue_games_parallel(
             random_opening_plies,
             explore_temp,
             offset_seed,
+            rule_norm,
         ))
         offset_seed += w_games * 100003
 
@@ -901,9 +923,12 @@ def _worker_pnnue_arena(args: Tuple) -> MatchStats:
         b_cnn_w,
         num_games,
         seed,
+        rule,
     ) = args
 
     lib = _bind_lib(Path(lib_path_str))
+    if hasattr(lib, "gomoku_set_rule"):
+        lib.gomoku_set_rule(rule_to_int(rule))
     pa = lib.gomoku_load_pnnue(pa_str.encode("utf-8")) if pa_str else None
     pb = lib.gomoku_load_pnnue(pb_str.encode("utf-8")) if pb_str else None
     v2_b = (
@@ -957,7 +982,9 @@ def run_pnnue_arena_parallel(
     b_time: float,
     b_cnn_w: float,
     seed: int,
+    rule: str = "renju",
 ) -> Dict[str, float]:
+    rule_norm = normalize_rule(rule)
     pa_str = str(pnnue_a_path) if (pnnue_a_path and Path(pnnue_a_path).exists()) else ""
     pb_str = str(pnnue_b_path) if (pnnue_b_path and Path(pnnue_b_path).exists()) else ""
     v2_n_str = str(v2_b_nnue_path) if (v2_b_nnue_path and Path(v2_b_nnue_path).exists()) else ""
@@ -991,6 +1018,7 @@ def run_pnnue_arena_parallel(
             b_cnn_w,
             g,
             cur_seed,
+            rule_norm,
         ))
         cur_seed += 97
 
@@ -1020,7 +1048,9 @@ def run_pnnue_arena_parallel(
     }
 
 
-def _check_five_in_row(board: np.ndarray, row: int, col: int, player: int) -> bool:
+def _check_five_in_row(
+    board: np.ndarray, row: int, col: int, player: int, freestyle: bool = False
+) -> bool:
     b2d = board.reshape(BOARD_SIZE, BOARD_SIZE)
     for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
         cnt = 1
@@ -1030,7 +1060,10 @@ def _check_five_in_row(board: np.ndarray, row: int, col: int, player: int) -> bo
                 cnt += 1
                 r += sign * dr
                 c += sign * dc
-        if (player == 1 and cnt == 5) or (player == 2 and cnt >= 5):
+        if freestyle:
+            if cnt >= 5:
+                return True
+        elif (player == 1 and cnt == 5) or (player == 2 and cnt >= 5):
             return True
     return False
 
@@ -1046,9 +1079,13 @@ def _worker_sparring_pnnue_v2(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, 
         vcf_depth,
         our_time,
         base_seed,
+        rule,
     ) = args
 
+    freestyle = normalize_rule(rule) == "freestyle"
     lib = _bind_lib(Path(lib_path_str))
+    if hasattr(lib, "gomoku_set_rule"):
+        lib.gomoku_set_rule(1 if freestyle else 0)
     p_handle = lib.gomoku_load_pnnue(pnnue_path_str.encode("utf-8")) if pnnue_path_str else None
     v2_handle = lib.gomoku_load_models(
         v2_nnue_str.encode("utf-8") if v2_nnue_str else b"",
@@ -1098,7 +1135,9 @@ def _worker_sparring_pnnue_v2(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, 
                 cand_pool = [
                     idx
                     for idx in (near if near else legal.tolist())
-                    if not _check_five_in_row(board, idx // BOARD_SIZE, idx % BOARD_SIZE, cur_p)
+                    if not _check_five_in_row(
+                        board, idx // BOARD_SIZE, idx % BOARD_SIZE, cur_p, freestyle=freestyle
+                    )
                 ]
                 pool = cand_pool if cand_pool else (near if near else legal.tolist())
                 pick = int(rng.choice(pool))
@@ -1135,7 +1174,7 @@ def _worker_sparring_pnnue_v2(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, 
                     move_idx < 0
                     or move_idx >= BOARD_CELLS
                     or board[move_idx] != 0
-                    or (player == 1 and forb[move_idx] != 0)
+                    or (not freestyle and player == 1 and forb[move_idx] != 0)
                 ):
                     if player == our_player:
                         illegal += 1
@@ -1154,7 +1193,7 @@ def _worker_sparring_pnnue_v2(args: Tuple) -> Tuple[Dict[str, np.ndarray], int, 
                 r, c = move_idx // BOARD_SIZE, move_idx % BOARD_SIZE
                 board[move_idx] = player
                 last_move = move_idx
-                if _check_five_in_row(board, r, c, player):
+                if _check_five_in_row(board, r, c, player, freestyle=freestyle):
                     winner = player
                     break
                 player = v2_player if player == our_player else our_player
@@ -1205,9 +1244,11 @@ def sparring_pnnue_vs_v2(
     vcf_depth: int,
     our_time: float,
     seed: int,
+    rule: str = "renju",
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
     import time
 
+    rule_norm = normalize_rule(rule)
     p_str = str(pnnue_path) if (pnnue_path and Path(pnnue_path).exists()) else ""
     vn_str = str(v2_nnue_path) if (v2_nnue_path and Path(v2_nnue_path).exists()) else ""
     vc_str = str(v2_cnn_path) if (v2_cnn_path and Path(v2_cnn_path).exists()) else ""
@@ -1232,6 +1273,7 @@ def sparring_pnnue_vs_v2(
                 vcf_depth,
                 our_time,
                 seed + idx * 100003,
+                rule_norm,
             )
         )
 

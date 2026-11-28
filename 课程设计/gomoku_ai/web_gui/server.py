@@ -61,6 +61,12 @@ def _bind_lib(lib_path: Path) -> ctypes.CDLL:
 
     lib = ctypes.CDLL(str(lib_path))
 
+    lib.gomoku_set_rule.argtypes = [ctypes.c_int]
+    lib.gomoku_set_rule.restype = None
+
+    lib.gomoku_get_rule.argtypes = []
+    lib.gomoku_get_rule.restype = ctypes.c_int
+
     lib.gomoku_load_models.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
     lib.gomoku_load_models.restype = ctypes.c_void_p
 
@@ -129,8 +135,13 @@ def _bind_lib(lib_path: Path) -> ctypes.CDLL:
     return lib
 
 
-def check_winner(board: List[int]) -> Tuple[int, List[List[int]]]:
-    """Check Renju win condition: Black exact 5, White >= 5, or full-board draw (3)."""
+def _normalize_rule(rule: Optional[str]) -> str:
+    return "freestyle" if str(rule or "renju").strip().lower() in ("freestyle", "free", "1") else "renju"
+
+
+def check_winner(board: List[int], rule: str = "renju") -> Tuple[int, List[List[int]]]:
+    """Check win condition: Renju (Black == 5, White >= 5) or Free-style (>= 5 for both), else draw (3)."""
+    rule_norm = _normalize_rule(rule)
     dirs = ((0, 1), (1, 0), (1, 1), (1, -1))
     for r in range(BOARD_SIZE):
         for c in range(BOARD_SIZE):
@@ -147,10 +158,14 @@ def check_winner(board: List[int]) -> Tuple[int, List[List[int]]]:
                     line.append([nr, nc])
                     nr += dr
                     nc += dc
-                if p == 1 and len(line) == 5:
-                    return 1, line
-                if p == 2 and len(line) >= 5:
-                    return 2, line[:5]
+                if rule_norm == "freestyle":
+                    if len(line) >= 5:
+                        return p, line[:5]
+                else:
+                    if p == 1 and len(line) == 5:
+                        return 1, line
+                    if p == 2 and len(line) >= 5:
+                        return 2, line[:5]
     if all(cell != 0 for cell in board):
         return 3, []
     return 0, []
@@ -188,6 +203,7 @@ class GomokuEngineBridge:
         self.lock = threading.Lock()
 
         self.pnnue_path = project_root / "models" / "pnnue.bin"
+        self.pnnue_freestyle_path = project_root / "models" / "pnnue_freestyle.bin"
         self.nnue_path = project_root / "models" / "nnue.bin"
         self.cnn_path = project_root / "models" / "cnn.bin"
 
@@ -199,34 +215,66 @@ class GomokuEngineBridge:
         self.pnnue_mtime: float = (
             self.pnnue_path.stat().st_mtime if self.v3_handle is not None else 0.0
         )
+        self.v3_freestyle_handle = (
+            self.lib.gomoku_load_pnnue(str(self.pnnue_freestyle_path).encode("utf-8"))
+            if self.pnnue_freestyle_path.exists()
+            else None
+        )
+        self.pnnue_freestyle_mtime: float = (
+            self.pnnue_freestyle_path.stat().st_mtime
+            if self.v3_freestyle_handle is not None
+            else 0.0
+        )
         v2_n = str(self.nnue_path).encode("utf-8") if self.nnue_path.exists() else b""
         v2_c = str(self.cnn_path).encode("utf-8") if self.cnn_path.exists() else b""
         self.v2_handle = self.lib.gomoku_load_models(v2_n, v2_c) if (v2_n or v2_c) else None
         self.heur_handle = self.lib.gomoku_load_models(b"", b"")
 
-    def _maybe_reload_pnnue(self) -> None:
-        if not self.pnnue_path.exists():
-            return
+    def _reload_one_pnnue(
+        self, path: Path, cur_handle: Any, cur_mtime: float, label: str
+    ) -> Tuple[Any, float]:
+        if not path.exists():
+            return cur_handle, cur_mtime
         try:
-            st = self.pnnue_path.stat()
+            st = path.stat()
         except OSError:
-            return
-        if st.st_size <= 0 or st.st_mtime <= self.pnnue_mtime + 0.5:
-            return
-        new_h = self.lib.gomoku_load_pnnue(str(self.pnnue_path).encode("utf-8"))
+            return cur_handle, cur_mtime
+        if st.st_size <= 0 or st.st_mtime <= cur_mtime + 0.5:
+            return cur_handle, cur_mtime
+        new_h = self.lib.gomoku_load_pnnue(str(path).encode("utf-8"))
         if new_h:
-            old_h = self.v3_handle
-            self.v3_handle = new_h
-            self.pnnue_mtime = st.st_mtime
-            if old_h:
-                self.lib.gomoku_free_pnnue(old_h)
-            print(f"[WebGUI] Hot-reloaded models/pnnue.bin (mtime={st.st_mtime:.1f})", flush=True)
+            if cur_handle:
+                self.lib.gomoku_free_pnnue(cur_handle)
+            print(f"[WebGUI] Hot-reloaded {label} (mtime={st.st_mtime:.1f})", flush=True)
+            return new_h, st.st_mtime
+        return cur_handle, cur_mtime
+
+    def _maybe_reload_pnnue(self) -> None:
+        self.v3_handle, self.pnnue_mtime = self._reload_one_pnnue(
+            self.pnnue_path, self.v3_handle, self.pnnue_mtime, "models/pnnue.bin"
+        )
+        self.v3_freestyle_handle, self.pnnue_freestyle_mtime = self._reload_one_pnnue(
+            self.pnnue_freestyle_path,
+            self.v3_freestyle_handle,
+            self.pnnue_freestyle_mtime,
+            "models/pnnue_freestyle.bin",
+        )
+
+    def _resolve_v3(self, rule: str) -> Tuple[Any, Path, str]:
+        if _normalize_rule(rule) == "freestyle":
+            if self.v3_freestyle_handle is not None:
+                return self.v3_freestyle_handle, self.pnnue_freestyle_path, "pnnue_freestyle.bin"
+            return self.v3_handle, self.pnnue_path, "pnnue.bin (fallback)"
+        return self.v3_handle, self.pnnue_path, "pnnue.bin"
 
     def close(self) -> None:
         with self.lock:
             if self.v3_handle:
                 self.lib.gomoku_free_pnnue(self.v3_handle)
                 self.v3_handle = None
+            if self.v3_freestyle_handle:
+                self.lib.gomoku_free_pnnue(self.v3_freestyle_handle)
+                self.v3_freestyle_handle = None
             if self.v2_handle:
                 self.lib.gomoku_free_models(self.v2_handle)
                 self.v2_handle = None
@@ -238,48 +286,66 @@ class GomokuEngineBridge:
         with self.lock:
             self._maybe_reload_pnnue()
             v3_ok = self.v3_handle is not None
+            v3_free_ok = self.v3_freestyle_handle is not None
             updated = (
                 time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.pnnue_mtime))
                 if self.pnnue_mtime > 0
                 else None
             )
+            free_updated = (
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.pnnue_freestyle_mtime))
+                if self.pnnue_freestyle_mtime > 0
+                else None
+            )
         return {
             "lib_path": str(self.lib_path),
             "board_size": BOARD_SIZE,
+            "supported_rules": ["renju", "freestyle"],
             "models": {
-                "v3": v3_ok,
+                "v3": v3_ok or v3_free_ok,
+                "v3_freestyle": v3_free_ok,
                 "v2": self.v2_handle is not None,
                 "heuristic": self.heur_handle is not None,
             },
             "pnnue_updated_at": updated,
+            "pnnue_freestyle_updated_at": free_updated,
         }
 
-    def extract_forbidden(self, board: List[int], player: int) -> List[int]:
+    def extract_forbidden(self, board: List[int], player: int, rule: str = "renju") -> List[int]:
+        rule_norm = _normalize_rule(rule)
         c_board = (ctypes.c_uint8 * BOARD_CELLS)(*board)
         c_forb = (ctypes.c_uint8 * BOARD_CELLS)()
         c_feat = (ctypes.c_float * EVAL_FEATURE_DIM)()
         with self.lock:
+            self.lib.gomoku_set_rule(1 if rule_norm == "freestyle" else 0)
             rc = self.lib.gomoku_extract_state(c_board, int(player), c_forb, c_feat)
         if rc != 0:
             raise RuntimeError(f"gomoku_extract_state failed with rc={rc}")
         return [int(c_forb[i]) for i in range(BOARD_CELLS)]
 
     def eval_v3_prior(
-        self, board: List[int], player: int, forbidden: Optional[List[int]] = None
+        self,
+        board: List[int],
+        player: int,
+        forbidden: Optional[List[int]] = None,
+        rule: str = "renju",
     ) -> Tuple[Optional[float], List[Dict[str, Any]]]:
-        if not self.pnnue_path.exists():
-            return None, []
+        rule_norm = _normalize_rule(rule)
         if forbidden is None:
-            forbidden = self.extract_forbidden(board, player)
+            forbidden = self.extract_forbidden(board, player, rule_norm)
         c_board = (ctypes.c_uint8 * BOARD_CELLS)(*board)
         c_val = ctypes.c_float(0.0)
         c_logits = (ctypes.c_float * BOARD_CELLS)()
         with self.lock:
             self._maybe_reload_pnnue()
+            self.lib.gomoku_set_rule(1 if rule_norm == "freestyle" else 0)
+            _, eval_path, _ = self._resolve_v3(rule_norm)
+            if not eval_path.exists():
+                return None, []
             rc = self.lib.gomoku_eval_pnnue_debug(
                 c_board,
                 int(player),
-                str(self.pnnue_path).encode("utf-8"),
+                str(eval_path).encode("utf-8"),
                 ctypes.byref(c_val),
                 c_logits,
             )
@@ -287,7 +353,9 @@ class GomokuEngineBridge:
             return None, []
 
         legal_indices = [
-            i for i in range(BOARD_CELLS) if board[i] == 0 and (player == 2 or forbidden[i] == 0)
+            i
+            for i in range(BOARD_CELLS)
+            if board[i] == 0 and (rule_norm == "freestyle" or player == 2 or forbidden[i] == 0)
         ]
         if not legal_indices:
             return _to_black_winrate(float(c_val.value), player), []
@@ -314,7 +382,9 @@ class GomokuEngineBridge:
         depth: int,
         time_limit: float,
         vcf_depth: int,
+        rule: str = "renju",
     ) -> Dict[str, Any]:
+        rule_norm = _normalize_rule(rule)
         c_board = (ctypes.c_uint8 * BOARD_CELLS)(*board)
         c_best = ctypes.c_int(-1)
         c_sval = ctypes.c_float(0.0)
@@ -323,19 +393,20 @@ class GomokuEngineBridge:
         c_feat = (ctypes.c_float * EVAL_FEATURE_DIM)()
 
         chosen = engine
-        if chosen == "v3" and self.v3_handle is None:
-            chosen = "v2" if self.v2_handle is not None else "heuristic"
-        if chosen == "v2" and self.v2_handle is None:
-            chosen = "heuristic"
-
+        model_label = "heuristic"
         t0 = time.perf_counter()
         with self.lock:
             self._maybe_reload_pnnue()
-            if chosen == "v3" and self.v3_handle is None:
+            self.lib.gomoku_set_rule(1 if rule_norm == "freestyle" else 0)
+            v3_h, _, v3_label = self._resolve_v3(rule_norm)
+            if chosen == "v3" and v3_h is None:
                 chosen = "v2" if self.v2_handle is not None else "heuristic"
+            if chosen == "v2" and self.v2_handle is None:
+                chosen = "heuristic"
             if chosen == "v3":
+                model_label = v3_label
                 rc = self.lib.gomoku_step_search_pnnue(
-                    self.v3_handle,
+                    v3_h,
                     c_board,
                     int(player),
                     int(last_move),
@@ -350,6 +421,7 @@ class GomokuEngineBridge:
                     c_forb,
                 )
             elif chosen == "v2":
+                model_label = "nnue.bin+cnn.bin" if self.cnn_path.exists() else "nnue.bin"
                 rc = self.lib.gomoku_step_search(
                     self.v2_handle,
                     c_board,
@@ -395,6 +467,8 @@ class GomokuEngineBridge:
         sval = float(c_sval.value)
         return {
             "engine_used": chosen,
+            "model_file": model_label,
+            "rule": rule_norm,
             "move_idx": idx,
             "row": idx // BOARD_SIZE,
             "col": idx % BOARD_SIZE,
@@ -405,7 +479,7 @@ class GomokuEngineBridge:
         }
 
 
-def _validate_board_payload(payload: Dict[str, Any]) -> Tuple[List[int], int]:
+def _validate_board_payload(payload: Dict[str, Any]) -> Tuple[List[int], int, str]:
     board = payload.get("board")
     if not isinstance(board, list) or len(board) != BOARD_CELLS:
         raise ValueError("`board` must be a list of 225 integers")
@@ -417,7 +491,8 @@ def _validate_board_payload(payload: Dict[str, Any]) -> Tuple[List[int], int]:
     player = int(payload.get("player", 1))
     if player not in (1, 2):
         raise ValueError("`player` must be 1 (Black) or 2 (White)")
-    return norm_board, player
+    rule = _normalize_rule(payload.get("rule", "renju"))
+    return norm_board, player, rule
 
 
 def make_handler(bridge: GomokuEngineBridge):
@@ -461,18 +536,19 @@ def make_handler(bridge: GomokuEngineBridge):
             path = self.path.split("?", 1)[0]
             try:
                 payload = self._read_json()
-                board, player = _validate_board_payload(payload)
+                board, player, rule = _validate_board_payload(payload)
 
                 if path == "/api/state":
-                    winner, win_line = check_winner(board)
-                    forb = bridge.extract_forbidden(board, player)
+                    winner, win_line = check_winner(board, rule)
+                    forb = bridge.extract_forbidden(board, player, rule)
                     prior_wr = None
                     prior_pol: List[Dict[str, Any]] = []
                     if payload.get("need_prior", False) and winner == 0:
-                        prior_wr, prior_pol = bridge.eval_v3_prior(board, player, forb)
+                        prior_wr, prior_pol = bridge.eval_v3_prior(board, player, forb, rule)
                     self._send_json(
                         HTTPStatus.OK,
                         {
+                            "rule": rule,
                             "forbidden": forb,
                             "winner": winner,
                             "win_line": win_line,
@@ -483,7 +559,7 @@ def make_handler(bridge: GomokuEngineBridge):
                     return
 
                 if path == "/api/move":
-                    winner, win_line = check_winner(board)
+                    winner, win_line = check_winner(board, rule)
                     if winner != 0:
                         self._send_json(
                             HTTPStatus.BAD_REQUEST,
@@ -497,7 +573,7 @@ def make_handler(bridge: GomokuEngineBridge):
                     time_limit = max(0.05, min(10.0, float(payload.get("time_limit", 0.8))))
 
                     res = bridge.search_move(
-                        board, player, last_move, engine, depth, time_limit, vcf_depth
+                        board, player, last_move, engine, depth, time_limit, vcf_depth, rule
                     )
                     idx = res["move_idx"]
                     if board[idx] != 0:
@@ -505,8 +581,8 @@ def make_handler(bridge: GomokuEngineBridge):
                     after_board = list(board)
                     after_board[idx] = player
                     next_player = 3 - player
-                    win_after, line_after = check_winner(after_board)
-                    forb_after = bridge.extract_forbidden(after_board, next_player)
+                    win_after, line_after = check_winner(after_board, rule)
+                    forb_after = bridge.extract_forbidden(after_board, next_player, rule)
                     res["winner"] = win_after
                     res["win_line"] = line_after
                     res["forbidden_after"] = forb_after
@@ -514,7 +590,7 @@ def make_handler(bridge: GomokuEngineBridge):
                     return
 
                 if path == "/api/analyze":
-                    winner, win_line = check_winner(board)
+                    winner, win_line = check_winner(board, rule)
                     if winner != 0:
                         self._send_json(
                             HTTPStatus.OK,
@@ -537,12 +613,14 @@ def make_handler(bridge: GomokuEngineBridge):
                     time_limit = max(0.05, min(10.0, float(payload.get("time_limit", 0.8))))
 
                     res = bridge.search_move(
-                        board, player, last_move, engine, depth, time_limit, vcf_depth
+                        board, player, last_move, engine, depth, time_limit, vcf_depth, rule
                     )
                     self._send_json(
                         HTTPStatus.OK,
                         {
                             "engine_used": res["engine_used"],
+                            "model_file": res.get("model_file", ""),
+                            "rule": rule,
                             "best_row": res["row"],
                             "best_col": res["col"],
                             "best_idx": res["move_idx"],

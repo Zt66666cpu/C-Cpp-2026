@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import sys
@@ -26,17 +27,29 @@ from train_pnnue import load_npz_dataset, merge_replay_buffer, select_device, tr
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Pretrain GPN2 (V4) from V3 backbone")
+    parser.add_argument("--rule", type=str, default="renju", choices=("renju", "freestyle"))
+    args = parser.parse_args()
+    rule = args.rule
+    is_free = rule == "freestyle"
+
     lib_path = find_engine_lib(PROJECT_ROOT)
     device = select_device("auto")
-    run_dir = PROJECT_ROOT / "training" / "runs_v3"
+    run_dir = PROJECT_ROOT / "training" / ("runs_freestyle" if is_free else "runs_v3")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    renju_dir = PROJECT_ROOT / "training" / "runs_v3"
     models_dir = PROJECT_ROOT / "models"
-    r4_bin = run_dir / "v3_r4_backup.bin"
-    r4_pt = run_dir / "v3_r4_backup.pt"
+    r4_bin = renju_dir / "v3_r4_backup.bin"
+    r4_pt = renju_dir / "v3_r4_backup.pt"
     v2_nnue = models_dir / "nnue.bin"
     v2_cnn = models_dir / "cnn.bin"
     v2_buf = PROJECT_ROOT / "training" / "data" / "replay_buffer.npz"
-    rapfi_buf = run_dir / "rapfi_distill.npz"
+    rapfi_buf = run_dir / ("rapfi_distill_freestyle.npz" if is_free else "rapfi_distill.npz")
+    if not rapfi_buf.exists():
+        rapfi_buf = renju_dir / "rapfi_distill.npz"
     buf_path = run_dir / "pnnue_buffer.npz"
+    prod_name = "pnnue_freestyle.bin" if is_free else "pnnue.bin"
+    phase_name = "v3_freestyle" if is_free else "v3_pnnue"
 
     assert r4_bin.exists() and r4_pt.exists(), f"Missing {r4_bin} / {r4_pt}"
     assert v2_buf.exists() and rapfi_buf.exists(), f"Missing {v2_buf} / {rapfi_buf}"
@@ -93,12 +106,12 @@ def main() -> None:
     assert diffs["max_val_diff"] < 1e-4 and diffs["max_pol_diff"] < 1e-4
 
     metrics_path = PROJECT_ROOT / "training" / "runs" / "metrics.jsonl"
-    max_logged_round = 22
+    max_logged_round = 0 if is_free else 22
     if metrics_path.exists():
         for ln in metrics_path.read_text(encoding="utf-8", errors="replace").splitlines():
             try:
                 row = json.loads(ln.strip())
-                if row.get("phase") == "v3_pnnue":
+                if row.get("phase") == phase_name:
                     max_logged_round = max(max_logged_round, int(row.get("round") or 0))
             except Exception:
                 pass
@@ -106,9 +119,9 @@ def main() -> None:
     torch.save({"model": v4_model.state_dict(), "round": max_logged_round, "arch": "v4"}, cand_pt)
 
     matches = [
-        ("1. V4_init vs Heuristic (64g d5 t=1.0s)", None, None, None, 0.0),
-        ("2. V4_init vs V3_R4     (64g d5 t=1.0s)", r4_bin, None, None, 0.0),
-        ("3. V4_init vs V2+Rapfi  (64g d5 t=1.0s)", None, v2_nnue, v2_cnn, 0.35),
+        (f"1. V4_init ({rule}) vs Heuristic (64g d5 t=1.0s)", None, None, None, 0.0),
+        (f"2. V4_init ({rule}) vs V3_R4     (64g d5 t=1.0s)", r4_bin, None, None, 0.0),
+        (f"3. V4_init ({rule}) vs V2+Rapfi  (64g d5 t=1.0s)", None, v2_nnue, v2_cnn, 0.35),
     ]
     vs_heur = None
     for label, pb, bn, bc, bcw in matches:
@@ -119,7 +132,7 @@ def main() -> None:
             v2_b_nnue_path=bn,
             v2_b_cnn_path=bc,
             num_games=64,
-            workers=16,
+            workers=12,
             a_depth=5,
             a_vcf=14,
             a_time=1.0,
@@ -128,19 +141,20 @@ def main() -> None:
             b_time=1.0,
             b_cnn_w=bcw,
             seed=seed + 505,
+            rule=rule,
         )
         print(f"{label}: {res}", flush=True)
         if pb is None and bn is None:
             vs_heur = res
 
     if vs_heur and vs_heur["score"] < 0.60:
-        print(f"ABORT_PROMOTE: V4_init vs Heuristic={vs_heur['score']:.3f} < 0.60", flush=True)
+        print(f"ABORT_PROMOTE: V4_init ({rule}) vs Heuristic={vs_heur['score']:.3f} < 0.60", flush=True)
         sys.exit(2)
 
     shutil.copy2(cand_bin, run_dir / "pnnue_champ.bin")
     shutil.copy2(cand_pt, run_dir / "pnnue_champ.pt")
-    shutil.copy2(cand_bin, models_dir / "pnnue.bin")
-    print(f"[Bootstrap V4] PROMOTED -> pnnue_champ.{{bin,pt}} & models/pnnue.bin (round={max_logged_round})", flush=True)
+    shutil.copy2(cand_bin, models_dir / prod_name)
+    print(f"[Bootstrap V4] PROMOTED -> {run_dir}/pnnue_champ.{{bin,pt}} & models/{prod_name} (round={max_logged_round})", flush=True)
 
 
 if __name__ == "__main__":

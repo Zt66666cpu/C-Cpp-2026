@@ -98,6 +98,7 @@ typedef struct {
     bool has_hint;
 
     GuiGameMode mode;
+    GameRule rule;
     GuiEngineKind engine;
     int max_depth;
     int time_idx;
@@ -121,6 +122,7 @@ typedef struct {
     AiShared shared;
 
     PatternNnueModel *pnnue;
+    PatternNnueModel *pnnue_freestyle;
     NnueModel *nnue;
     CnnModel *cnn;
     Font ui_font;
@@ -167,6 +169,13 @@ static void gui_mutex_unlock(AiShared *s) {
 
 static const char *ui_tr(const GuiState *st, const char *zh, const char *en) {
     return st->has_cjk ? zh : en;
+}
+
+static const PatternNnueModel *gui_active_pnnue(const GuiState *st) {
+    if (st->rule == RULE_FREESTYLE && st->pnnue_freestyle != NULL) {
+        return st->pnnue_freestyle;
+    }
+    return st->pnnue;
 }
 
 static const char *forbidden_name_local(const GuiState *st, ForbiddenReason r) {
@@ -243,8 +252,9 @@ static bool spawn_ai_worker(GuiState *st, bool is_hint) {
     args->cfg.cnn_value_weight = 0.35f;
     args->cfg.use_nnue = (st->engine != ENGINE_HEURISTIC);
     args->cfg.use_cnn = (st->engine == ENGINE_V2_DUAL && st->cnn != NULL);
+    args->cfg.rule = st->rule;
     args->engine = st->engine;
-    args->pnnue = st->pnnue;
+    args->pnnue = gui_active_pnnue(st);
     args->nnue = st->nnue;
     args->cnn = st->cnn;
     args->generation = st->generation;
@@ -309,10 +319,10 @@ static void load_best_font(GuiState *st) {
         " !\"#$%&'()*+,-./0123456789:;<=>?@"
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
         "abcdefghijklmnopqrstuvwxyz{|}~"
-        "五子棋AI工作室引擎选择单网双纯启发对局模式人机执黑自博弈搜索深度单步限时"
-        "新开一局悔提示保存棋谱禁手标记数音效关闭复盘步进上次下回合胜率思考中"
-        "准备就绪获连长四三平局已退回至第请点击交叉落非法位置导出到失败未足"
-        "光标无当前实时状态加载完成：，。（）";
+        "五子棋AI工作室引擎选择单网双纯启发对局模式人机执黑执白双人对弈AI自博弈"
+        "搜索深度单步限时新开一局悔棋提示保存棋谱禁手标记手数音效开关复盘步进"
+        "上次下回合胜率思考中准备就绪获连长四三平局已退回至第请点击交叉点落子"
+        "非法位置导出到失败未足光标无当前实时状态加载完成方胜负判满盘规则有自由连珠切换：，。（）";
 
     static const char *kCjkFonts[] = {
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
@@ -445,7 +455,7 @@ static bool is_ai_turn_gui(GuiGameMode mode, Cell player) {
 static void refresh_forbidden_cache(GuiState *st) {
     memset(st->forbidden_map, 0, sizeof(st->forbidden_map));
     memset(st->forbidden_reasons, 0, sizeof(st->forbidden_reasons));
-    if (st->game_over || st->current_player != CELL_BLACK) {
+    if (st->rule == RULE_FREESTYLE || st->game_over || st->current_player != CELL_BLACK) {
         return;
     }
     for (int r = 0; r < BOARD_SIZE; ++r) {
@@ -453,7 +463,7 @@ static void refresh_forbidden_cache(GuiState *st) {
             if (!board_is_empty(&st->board, r, c)) {
                 continue;
             }
-            ForbiddenReason reason = rules_check_black_forbidden(&st->board, r, c);
+            ForbiddenReason reason = rules_check_black_forbidden_ex(&st->board, r, c, st->rule);
             if (reason != FORBIDDEN_NONE) {
                 int idx = r * BOARD_SIZE + c;
                 st->forbidden_map[idx] = true;
@@ -505,7 +515,7 @@ static void apply_gui_move(
     const SearchStats *stats
 ) {
     Cell mover = st->current_player;
-    MoveOutcome outcome = rules_apply_move(&st->board, row, col, mover);
+    MoveOutcome outcome = rules_apply_move_ex(&st->board, row, col, mover, st->rule);
     if (outcome.result == MOVE_INVALID) {
         snprintf(
             st->toast_msg,
@@ -809,7 +819,8 @@ static void render_board(
         move_num_map[m.row * BOARD_SIZE + m.col] = i + 1;
     }
 
-    if (!scrubbing && st->show_forbidden && !st->game_over && st->current_player == CELL_BLACK) {
+    if (!scrubbing && st->show_forbidden && st->rule == RULE_RENJU
+        && !st->game_over && st->current_player == CELL_BLACK) {
         for (int r = 0; r < BOARD_SIZE; ++r) {
             for (int c = 0; c < BOARD_SIZE; ++c) {
                 if (st->forbidden_map[r * BOARD_SIZE + c]) {
@@ -868,10 +879,14 @@ int main(void) {
     init_stone_sound(&st);
 
     char pnnue_path[1024] = {0};
+    char pnnue_free_path[1024] = {0};
     char nnue_path[1024] = {0};
     char cnn_path[1024] = {0};
     if (resolve_model_file("pnnue.bin", pnnue_path, sizeof(pnnue_path))) {
         st.pnnue = pnnue_load(pnnue_path);
+    }
+    if (resolve_model_file("pnnue_freestyle.bin", pnnue_free_path, sizeof(pnnue_free_path))) {
+        st.pnnue_freestyle = pnnue_load(pnnue_free_path);
     }
     if (resolve_model_file("nnue.bin", nnue_path, sizeof(nnue_path))) {
         st.nnue = nnue_load(nnue_path);
@@ -880,7 +895,7 @@ int main(void) {
         st.cnn = cnn_load(cnn_path);
     }
 
-    if (st.pnnue) {
+    if (st.pnnue || st.pnnue_freestyle) {
         st.engine = ENGINE_V3_PNNUE;
     } else if (st.nnue || st.cnn) {
         st.engine = ENGINE_V2_DUAL;
@@ -889,8 +904,9 @@ int main(void) {
     }
 
     printf(
-        "Gomoku GUI models: V3=%s | V2-NNUE=%s | V2-CNN=%s | CJK=%s | Audio=%s\n",
+        "Gomoku GUI models: V3-Renju=%s | V3-Free=%s | V2-NNUE=%s | V2-CNN=%s | CJK=%s | Audio=%s\n",
         st.pnnue ? pnnue_path : "(none)",
+        st.pnnue_freestyle ? pnnue_free_path : "(fallback)",
         st.nnue ? nnue_path : "(none)",
         st.cnn ? cnn_path : "(none)",
         st.has_cjk ? "on" : "fallback",
@@ -899,6 +915,7 @@ int main(void) {
     fflush(stdout);
 
     st.mode = GUI_MODE_HUMAN_BLACK;
+    st.rule = RULE_RENJU;
     st.max_depth = 5;
     st.time_idx = 1;
     st.show_forbidden = true;
@@ -1021,7 +1038,7 @@ int main(void) {
         y += 19.0f;
         float bw3 = (w - 12.0f) / 3.0f;
         Color blue_hi = (Color){56, 118, 206, 255};
-        if (ui_button(&st, (Rectangle){x, y, bw3, 29.0f}, ui_tr(&st, "V3 单网", "V3 PNNUE"), st.engine == ENGINE_V3_PNNUE, st.pnnue != NULL, blue_hi)) {
+        if (ui_button(&st, (Rectangle){x, y, bw3, 29.0f}, ui_tr(&st, "V3 单网", "V3 PNNUE"), st.engine == ENGINE_V3_PNNUE, gui_active_pnnue(&st) != NULL, blue_hi)) {
             st.engine = ENGINE_V3_PNNUE;
         }
         if (ui_button(&st, (Rectangle){x + bw3 + 6.0f, y, bw3, 29.0f}, ui_tr(&st, "V2 双网", "V2 Dual"), st.engine == ENGINE_V2_DUAL, (st.nnue != NULL || st.cnn != NULL), blue_hi)) {
@@ -1053,7 +1070,25 @@ int main(void) {
             st.mode = GUI_MODE_AI_VS_AI;
             reset_game(&st);
         }
-        y += 38.0f;
+        y += 36.0f;
+
+        /* Rule selector */
+        draw_txt(&st, ui_tr(&st, "规则切换", "Rules"), x, y, 14.0f, (Color){168, 178, 196, 255});
+        y += 18.0f;
+        Color rule_hi = (Color){126, 92, 192, 255};
+        if (ui_button(&st, (Rectangle){x, y, bw2, 27.0f}, ui_tr(&st, "有禁手 (连珠)", "Renju (Forb)"), st.rule == RULE_RENJU, true, rule_hi)) {
+            if (st.rule != RULE_RENJU) {
+                st.rule = RULE_RENJU;
+                reset_game(&st);
+            }
+        }
+        if (ui_button(&st, (Rectangle){x + bw2 + 8.0f, y, bw2, 27.0f}, ui_tr(&st, "无禁手 (自由)", "Free-style"), st.rule == RULE_FREESTYLE, true, rule_hi)) {
+            if (st.rule != RULE_FREESTYLE) {
+                st.rule = RULE_FREESTYLE;
+                reset_game(&st);
+            }
+        }
+        y += 34.0f;
 
         /* Depth & Time selectors */
         draw_txt(&st, ui_tr(&st, "搜索深度 / 单步限时", "Depth & Time Budget"), x, y, 14.0f, (Color){168, 178, 196, 255});
@@ -1231,6 +1266,7 @@ int main(void) {
     }
 
     pnnue_free(st.pnnue);
+    pnnue_free(st.pnnue_freestyle);
     nnue_free(st.nnue);
     cnn_free(st.cnn);
     gui_mutex_destroy(&st.shared);

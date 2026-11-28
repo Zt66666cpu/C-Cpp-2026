@@ -14,6 +14,8 @@ typedef struct {
     int games;
     double time_limit;
     int max_depth;
+    GameRule rule;
+    bool pnnue_explicit;
     const char *pnnue_path;
     const char *nnue_path;
     const char *cnn_path;
@@ -39,6 +41,8 @@ static void print_usage(const char *prog) {
     printf("  --games N           Number of games for --ai-vs-ai (default: 1)\n");
     printf("  --time SEC          Search time limit per move in seconds (default: 5.0)\n");
     printf("  --depth D           Max search depth (default: 5)\n");
+    printf("  --rule MODE         Rule mode: renju (default, with forbidden) or freestyle\n");
+    printf("  --freestyle         Shortcut for --rule freestyle (no forbidden moves)\n");
     printf("  --pnnue PATH        Path to V3 Pattern-NNUE binary (default: models/pnnue.bin)\n");
     printf("  --nnue PATH         Path to NNUE-Lite model binary (default: models/nnue.bin)\n");
     printf("  --cnn PATH          Path to Policy-Value CNN binary (default: models/cnn.bin)\n");
@@ -52,6 +56,8 @@ static bool parse_cli(int argc, char **argv, CliOptions *opts) {
     opts->games = 1;
     opts->time_limit = 5.0;
     opts->max_depth = 5;
+    opts->rule = RULE_RENJU;
+    opts->pnnue_explicit = false;
     opts->pnnue_path = "models/pnnue.bin";
     opts->nnue_path = "models/nnue.bin";
     opts->cnn_path = "models/cnn.bin";
@@ -68,8 +74,21 @@ static bool parse_cli(int argc, char **argv, CliOptions *opts) {
             opts->time_limit = atof(argv[++i]);
         } else if (strcmp(argv[i], "--depth") == 0 && i + 1 < argc) {
             opts->max_depth = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--freestyle") == 0) {
+            opts->rule = RULE_FREESTYLE;
+        } else if (strcmp(argv[i], "--rule") == 0 && i + 1 < argc) {
+            const char *val = argv[++i];
+            if (strcmp(val, "freestyle") == 0 || strcmp(val, "free") == 0) {
+                opts->rule = RULE_FREESTYLE;
+            } else if (strcmp(val, "renju") == 0) {
+                opts->rule = RULE_RENJU;
+            } else {
+                fprintf(stderr, "Unknown rule mode: %s (expected renju or freestyle)\n", val);
+                return false;
+            }
         } else if (strcmp(argv[i], "--pnnue") == 0 && i + 1 < argc) {
             opts->pnnue_path = argv[++i];
+            opts->pnnue_explicit = true;
         } else if (strcmp(argv[i], "--nnue") == 0 && i + 1 < argc) {
             opts->nnue_path = argv[++i];
         } else if (strcmp(argv[i], "--cnn") == 0 && i + 1 < argc) {
@@ -113,6 +132,7 @@ static const char *mode_name(GameMode mode) {
 static void save_game_record(
     const char *path,
     GameMode mode,
+    GameRule rule,
     const Board *board,
     const GameMoveRecord *history,
     int history_len,
@@ -131,7 +151,13 @@ static void save_game_record(
 
     fprintf(fp, "# Gomoku AI Game Record\n");
     fprintf(fp, "Mode: %s\n", mode_name(mode));
-    fprintf(fp, "Board: %dx%d (Black forbidden rules enabled)\n", BOARD_SIZE, BOARD_SIZE);
+    fprintf(
+        fp,
+        "Board: %dx%d (%s)\n",
+        BOARD_SIZE,
+        BOARD_SIZE,
+        rule == RULE_FREESTYLE ? "Free-style, no forbidden moves" : "Renju, Black forbidden rules enabled"
+    );
     fprintf(fp, "Total Plies: %d\n", history_len);
     if (game_finished) {
         const char *res_str = "Draw";
@@ -263,7 +289,7 @@ static int run_single_game(
             }
         }
 
-        MoveOutcome outcome = rules_apply_move(&board, row, col, current_player);
+        MoveOutcome outcome = rules_apply_move_ex(&board, row, col, current_player, cfg->rule);
         if (outcome.result == MOVE_INVALID) {
             ui_print_move_error(outcome);
             if (ai_move) {
@@ -311,7 +337,7 @@ static int run_single_game(
 
     if (record_path && history_len > 0) {
         save_game_record(
-            record_path, mode, &board, history, history_len, last_outcome, game_finished
+            record_path, mode, cfg->rule, &board, history, history_len, last_outcome, game_finished
         );
     }
     return rc;
@@ -328,6 +354,14 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (opts.rule == RULE_FREESTYLE && !opts.pnnue_explicit) {
+        FILE *fp_free = fopen("models/pnnue_freestyle.bin", "rb");
+        if (fp_free) {
+            fclose(fp_free);
+            opts.pnnue_path = "models/pnnue_freestyle.bin";
+        }
+    }
+
     PatternNnueModel *pnnue = NULL;
     NnueModel *nnue = NULL;
     CnnModel *cnn = NULL;
@@ -338,21 +372,23 @@ int main(int argc, char **argv) {
             cnn = cnn_load(opts.cnn_path);
         }
         if (pnnue) {
-            printf("Engine models: V3 Pattern-NNUE=%s\n", opts.pnnue_path);
+            printf("Engine models: V3 Pattern-NNUE=%s (rule=%s)\n", opts.pnnue_path, rules_name(opts.rule));
         } else {
             printf(
-                "Engine models: NNUE=%s, CNN=%s (V3 PNNUE not loaded)\n",
+                "Engine models: NNUE=%s, CNN=%s (V3 PNNUE not loaded, rule=%s)\n",
                 nnue ? opts.nnue_path : "none (linear fallback)",
-                cnn ? opts.cnn_path : "none (heuristic ordering)"
+                cnn ? opts.cnn_path : "none (heuristic ordering)",
+                rules_name(opts.rule)
             );
         }
     } else {
-        printf("Engine models: disabled (--no-nn, linear heuristic mode)\n");
+        printf("Engine models: disabled (--no-nn, linear heuristic mode, rule=%s)\n", rules_name(opts.rule));
     }
 
     SearchConfig cfg = search_default_config();
     cfg.time_limit_sec = opts.time_limit;
     cfg.max_depth = opts.max_depth;
+    cfg.rule = opts.rule;
     cfg.use_nnue = (pnnue != NULL || nnue != NULL);
     cfg.use_cnn = (pnnue == NULL && cnn != NULL);
 

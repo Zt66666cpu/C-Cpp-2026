@@ -16,3 +16,6 @@ models/*
 checkpoints/
 training-data/
 training/runs_v3/
+training/runs_freestyle/
+macos-island/.build/
+macos-island/GomokuIsland.app/

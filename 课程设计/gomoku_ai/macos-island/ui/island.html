@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>五子棋 AI 监控灵动岛</title>
+  <style>
+    :root {
+      --panel-bg: #000000;
+      --card-bg: rgba(255, 255, 255, 0.065);
+      --card-hover: rgba(255, 255, 255, 0.11);
+      --border: rgba(255, 255, 255, 0.11);
+      --text: #f5f7fb;
+      --muted: rgba(255, 255, 255, 0.64);
+      --dim: rgba(255, 255, 255, 0.42);
+      --green: #34d399;
+      --blue: #7dd3fc;
+      --amber: #fbbf24;
+      --red: #f87171;
+      --gold: #e2b66d;
+    }
+
+    body.floating {
+      --panel-bg: transparent;
+      --card-bg: rgba(255, 255, 255, 0.09);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--panel-bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .root {
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      height: 100%;
+      padding: 10px 14px 12px;
+      background: var(--panel-bg);
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .title-group {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--amber);
+      flex-shrink: 0;
+    }
+
+    .status-dot.running {
+      background: var(--green);
+      box-shadow: 0 0 8px rgba(52, 211, 153, 0.8);
+      animation: pulse 1.1s infinite alternate;
+    }
+
+    .status-dot.offline {
+      background: var(--red);
+    }
+
+    @keyframes pulse {
+      from { opacity: 0.45; transform: scale(0.9); }
+      to { opacity: 1; transform: scale(1.15); }
+    }
+
+    .title {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+      white-space: nowrap;
+    }
+
+    .pill {
+      font-size: 10px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .pill.running {
+      color: var(--green);
+      border-color: rgba(52, 211, 153, 0.35);
+      background: rgba(52, 211, 153, 0.12);
+    }
+
+    .pill.paused {
+      color: var(--amber);
+      border-color: rgba(251, 191, 36, 0.35);
+      background: rgba(251, 191, 36, 0.12);
+    }
+
+    .pill.offline {
+      color: var(--red);
+      border-color: rgba(248, 113, 113, 0.35);
+      background: rgba(248, 113, 113, 0.12);
+    }
+
+    select {
+      background: rgba(255, 255, 255, 0.09);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 4px 8px;
+      font-size: 11px;
+      max-width: 190px;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .stage-bar {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .stage-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .stage-main {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .stage-meta {
+      font-size: 11px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .stage-sub {
+      font-size: 11px;
+      color: var(--dim);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .kpi-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .kpi-label {
+      font-size: 10px;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .kpi-val {
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.15;
+    }
+
+    .kpi-sub {
+      font-size: 10.5px;
+      color: var(--dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .chart-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .chart-hdr {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 10.5px;
+      color: var(--muted);
+    }
+
+    .legend {
+      display: flex;
+      gap: 8px;
+      font-size: 10px;
+    }
+
+    .legend span { display: inline-flex; align-items: center; gap: 3px; }
+    .legend i { width: 7px; height: 2px; display: inline-block; border-radius: 1px; }
+
+    canvas#curve {
+      width: 100%;
+      height: 104px;
+      display: block;
+    }
+
+    .log-card {
+      flex: 1;
+      min-height: 70px;
+      background: rgba(255, 255, 255, 0.045);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 7px 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      overflow: hidden;
+    }
+
+    .log-title {
+      font-size: 10px;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .log-body {
+      flex: 1;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px;
+      line-height: 1.42;
+      color: rgba(255, 255, 255, 0.78);
+      white-space: pre-wrap;
+      word-break: break-all;
+      -webkit-user-select: text;
+      user-select: text;
+    }
+
+    .footer {
+      display: grid;
+      grid-template-columns: 1.25fr 1fr 0.85fr 0.75fr;
+      gap: 6px;
+    }
+
+    button {
+      font-family: inherit;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--card-bg);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-size: 11px;
+      font-weight: 500;
+      transition: background 0.14s ease, border-color 0.14s ease;
+    }
+
+    button:hover {
+      background: var(--card-hover);
+      border-color: rgba(226, 182, 109, 0.5);
+    }
+
+    button.primary {
+      background: rgba(226, 182, 109, 0.18);
+      border-color: rgba(226, 182, 109, 0.5);
+      color: #f8dfb2;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="root">
+    <div class="topbar">
+      <div class="title-group">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="title">五子棋 AI 监控</span>
+        <span class="pill" id="statusPill">连接中</span>
+        <span class="pill" id="rulePill">—</span>
+      </div>
+      <select id="runSelect" title="切换监控训练任务"></select>
+    </div>
+
+    <div class="stage-bar">
+      <div class="stage-row">
+        <span class="stage-main" id="stageMain">等待监控台数据...</span>
+        <span class="stage-meta" id="stageMeta">—</span>
+      </div>
+      <div class="stage-sub" id="stageSub">—</div>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label"><span>vs Heuristic</span><span id="heurBest">最佳 —</span></div>
+        <div class="kpi-val" id="heurVal" style="color:var(--green)">—</div>
+        <div class="kpi-sub" id="heurSub">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label"><span>vs V2 基线</span><span id="v2Best">最佳 —</span></div>
+        <div class="kpi-val" id="v2Val" style="color:var(--blue)">—</div>
+        <div class="kpi-sub" id="v2Sub">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label"><span>Val Loss / Top-1</span><span id="gateBadge">—</span></div>
+        <div class="kpi-val" id="lossVal" style="color:var(--amber)">—</div>
+        <div class="kpi-sub" id="lossSub">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label"><span>样本缓冲 / 耗时</span><span id="machineTag">—</span></div>
+        <div class="kpi-val" id="bufVal">—</div>
+        <div class="kpi-sub" id="bufSub">—</div>
+      </div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-hdr">
+        <span id="chartTitle">历史演化曲线</span>
+        <div class="legend">
+          <span><i style="background:var(--green)"></i>Heur%</span>
+          <span><i style="background:var(--blue)"></i>V2%</span>
+          <span><i style="background:var(--amber)"></i>Loss</span>
+        </div>
+      </div>
+      <canvas id="curve"></canvas>
+    </div>
+
+    <div class="log-card">
+      <div class="log-title">
+        <span>训练日志尾部</span>
+        <span id="logTime">—</span>
+      </div>
+      <div class="log-body" id="logBody">等待日志流...</div>
+    </div>
+
+    <div class="footer">
+      <button class="primary" id="btnFull">完整监控台 ↗</button>
+      <button id="btnBoard">对弈棋盘</button>
+      <button id="btnBrowser">浏览器</button>
+      <button id="btnRefresh">刷新</button>
+    </div>
+  </div>
+
+  <script>
+    const postNative = (msg) => {
+      try {
+        window.webkit.messageHandlers.native.postMessage(msg);
+      } catch (_) {}
+    };
+
+    window.__setSurfaceStyle = (style) => {
+      document.body.classList.toggle("floating", style === "floating");
+    };
+
+    const pct = (v) => (typeof v === "number" && isFinite(v)) ? (v * 100).toFixed(1) + "%" : "—";
+    const num = (v, d = 4) => (typeof v === "number" && isFinite(v)) ? v.toFixed(d) : "—";
+
+    function formatAge(ageSec) {
+      if (typeof ageSec !== "number" || !isFinite(ageSec)) return "—";
+      if (ageSec < 60) return `${Math.round(ageSec)}s 前`;
+      if (ageSec < 3600) return `${Math.round(ageSec / 60)}m 前`;
+      return `${(ageSec / 3600).toFixed(1)}h 前`;
+    }
+
+    function ruleLabel(sel) {
+      const latest = sel.latest || {};
+      const g = sel.gomoku || {};
+      const rule = latest.rule || "";
+      const phase = latest.phase || g.phase || "";
+      if (rule === "freestyle" || phase === "v3_freestyle") return "无禁手";
+      if (rule === "renju") return "有禁手";
+      if (phase === "v3_pnnue" || phase === "v2" || phase === "v1") return "连珠·有禁";
+      return phase || "—";
+    }
+
+    function drawChart(metrics) {
+      const canvas = document.getElementById("curve");
+      const rect = canvas.getBoundingClientRect();
+      const w = Math.max(200, Math.round(rect.width));
+      const h = Math.max(80, Math.round(rect.height));
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+      }
+      const ctx = canvas.getContext("2d");
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, h);
+
+      const padX = 8, padY = 8;
+      const cw = w - padX * 2, ch = h - padY * 2;
+
+      // 50% baseline
+      ctx.strokeStyle = "rgba(255,255,255,0.12)";
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(padX, padY + ch * 0.5);
+      ctx.lineTo(padX + cw, padY + ch * 0.5);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const rows = Array.isArray(metrics) ? metrics : [];
+      if (rows.length < 1) {
+        ctx.fillStyle = "rgba(255,255,255,0.35)";
+        ctx.font = "11px -apple-system, sans-serif";
+        ctx.fillText("暂无多轮历史指标", padX + 4, padY + ch * 0.54);
+        ctx.restore();
+        return;
+      }
+
+      const heurs = rows.map(r => r.vs_heuristic && typeof r.vs_heuristic.score === "number" ? r.vs_heuristic.score : null);
+      const v2s = rows.map(r => {
+        const s = (r.vs_v2 && typeof r.vs_v2.score === "number") ? r.vs_v2.score
+          : (r.vs_v1 && typeof r.vs_v1.score === "number" ? r.vs_v1.score : null);
+        return s;
+      });
+      const losses = rows.map(r => typeof r.val_loss === "number" && r.val_loss > 0 ? r.val_loss : (typeof r.nnue_val_loss === "number" && r.nnue_val_loss > 0 ? r.nnue_val_loss : null));
+
+      const plotLine = (vals, color, minV, maxV, dashed = false) => {
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.7;
+        if (dashed) ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        let started = false;
+        vals.forEach((v, idx) => {
+          if (v === null) return;
+          const x = padX + (rows.length === 1 ? cw * 0.5 : (idx / (rows.length - 1)) * cw);
+          const norm = Math.max(0, Math.min(1, (v - minV) / Math.max(1e-6, maxV - minV)));
+          const y = padY + (1 - norm) * ch;
+          if (!started) { ctx.moveTo(x, y); started = true; }
+          else { ctx.lineTo(x, y); }
+        });
+        ctx.stroke();
+        ctx.restore();
+      };
+
+      const validLoss = losses.filter(v => v !== null);
+      if (validLoss.length) {
+        const lMin = Math.min(...validLoss) * 0.95;
+        const lMax = Math.max(...validLoss) * 1.05;
+        plotLine(losses, "#fbbf24", lMin, lMax, true);
+      }
+      plotLine(v2s, "#7dd3fc", 0.25, 0.90, false);
+      plotLine(heurs, "#34d399", 0.25, 0.90, false);
+
+      ctx.restore();
+    }
+
+    let lastPayload = null;
+    let lastMeta = {};
+
+    window.__updateMonitorData = (rawJson, meta) => {
+      try {
+        lastPayload = typeof rawJson === "string" ? JSON.parse(rawJson) : rawJson;
+      } catch (_) {
+        return;
+      }
+      lastMeta = meta || {};
+      render(lastPayload, lastMeta);
+    };
+
+    function render(data, meta) {
+      if (!data) return;
+      const sel = data.selected || {};
+      const g = sel.gomoku || {};
+      const latest = sel.latest || {};
+      const runs = Array.isArray(data.runs) ? data.runs : [];
+
+      // Populate run selector
+      const selEl = document.getElementById("runSelect");
+      const currentKey = sel.key || sel.run || meta.selectedRunKey || "";
+      const optionsSig = runs.map(r => (r.key || r.run) + ":" + (r.running ? "1" : "0")).join("|");
+      if (selEl.dataset.sig !== optionsSig) {
+        selEl.dataset.sig = optionsSig;
+        selEl.innerHTML = "";
+        runs.forEach(r => {
+          const k = r.key || r.run || "";
+          const opt = document.createElement("option");
+          opt.value = k;
+          const badge = r.running ? "● " : "○ ";
+          opt.textContent = badge + k;
+          selEl.appendChild(opt);
+        });
+      }
+      if (currentKey && selEl.value !== currentKey) {
+        selEl.value = currentKey;
+      }
+
+      const running = !!sel.running;
+      const dot = document.getElementById("statusDot");
+      const pill = document.getElementById("statusPill");
+      dot.className = "status-dot " + (running ? "running" : "paused");
+      pill.className = "pill " + (running ? "running" : "paused");
+      pill.textContent = running ? "训练中" : "已暂停";
+      document.getElementById("rulePill").textContent = ruleLabel(sel);
+
+      const curRnd = g.current_round || latest.round || latest.iter || 0;
+      const maxRnd = g.max_rounds || sel.max_iters || 0;
+      const rndStr = maxRnd > 0 ? `第 ${curRnd}/${maxRnd} 轮` : `第 ${curRnd} 轮`;
+      document.getElementById("stageMain").textContent =
+        `${rndStr} · ${g.stage_label || (running ? "训练中" : "待机")}`;
+      document.getElementById("stageMeta").textContent =
+        running ? `${g.worker_count || 0} workers · 活跃` : `上次上报 ${formatAge(sel.last_report_age_s)}`;
+      document.getElementById("stageSub").textContent =
+        g.stage_detail || g.arch || (sel.machine_label || sel.machine || "—");
+
+      // KPI 1: vs Heuristic
+      const vh = latest.vs_heuristic || {};
+      const heurScore = typeof vh.score === "number" ? vh.score : g.latest_heuristic_score;
+      document.getElementById("heurVal").textContent = pct(heurScore);
+      document.getElementById("heurBest").textContent = "最佳 " + pct(g.best_heuristic_score);
+      document.getElementById("heurSub").textContent =
+        typeof vh.wins === "number"
+          ? `${vh.wins}W ${vh.losses || 0}L ${vh.draws || 0}D · ${vh.cand_ms ? Math.round(vh.cand_ms) + "ms" : ""}`
+          : "暂无对局统计";
+
+      // KPI 2: vs V2
+      const vv2 = latest.vs_v2 || latest.vs_v1 || {};
+      const v2Score = typeof vv2.score === "number" ? vv2.score : g.latest_v1_score;
+      document.getElementById("v2Val").textContent = pct(v2Score);
+      document.getElementById("v2Best").textContent = "最佳 " + pct(g.best_v1_score);
+      document.getElementById("v2Sub").textContent =
+        typeof vv2.wins === "number"
+          ? `${vv2.wins}W ${vv2.losses || 0}L · ${vv2.cand_ms ? Math.round(vv2.cand_ms) + "ms" : ""}`
+          : "暂无 V2 对比";
+
+      // KPI 3: Val loss & Top-1
+      const vloss = latest.val_loss ?? latest.nnue_val_loss ?? g.latest_nnue_val_mse;
+      const top1 = latest.cnn_val_top1 ?? latest.val_top1 ?? g.latest_cnn_val_top1;
+      document.getElementById("lossVal").textContent = num(vloss, 4);
+      document.getElementById("lossSub").textContent =
+        `Top1 ${pct(top1)} · Gate ${pct(latest.gate_score ?? latest.nnue_gate_score)}`;
+      document.getElementById("gateBadge").textContent =
+        latest.promoted ? "已晋级 ✓" : (latest.round ? `R${latest.round}` : "—");
+
+      // KPI 4: Buffer & system
+      const buf = g.buffer_positions || latest.buffer_positions || 0;
+      document.getElementById("bufVal").textContent = buf > 0 ? `${Math.round(buf / 1000)}k 样本` : "—";
+      const avgSec = g.avg_round_sec || latest.total_sec;
+      document.getElementById("bufSub").textContent =
+        avgSec ? `单轮约 ${Math.round(avgSec)}s` : (sel.last_report_at || "—");
+      document.getElementById("machineTag").textContent = sel.machine === "windows-4070" ? "Win4070" : "Mac";
+
+      const metrics = sel.metrics || [];
+      document.getElementById("chartTitle").textContent = `历史演化曲线 (${metrics.length} 轮)`;
+      drawChart(metrics);
+
+      const logTail = (data.log && Array.isArray(data.log.tail)) ? data.log.tail.slice(-10) : [];
+      const logBox = document.getElementById("logBody");
+      logBox.textContent = logTail.length ? logTail.join("\n") : "(暂无日志输出)";
+      logBox.scrollTop = logBox.scrollHeight;
+      document.getElementById("logTime").textContent = data.log && data.log.updated_at ? data.log.updated_at.slice(11, 19) : "";
+    }
+
+    document.getElementById("runSelect").onchange = (e) => {
+      postNative({ action: "selectRun", run: e.target.value });
+    };
+    document.getElementById("btnFull").onclick = () => postNative({ action: "setSurface", surface: "full" });
+    document.getElementById("btnBoard").onclick = () =>
+      postNative({ action: "openExternal", url: lastMeta.webGuiUrl || "http://127.0.0.1:8768" });
+    document.getElementById("btnBrowser").onclick = () =>
+      postNative({ action: "openExternal", url: lastMeta.monitorUrl || "http://127.0.0.1:8766" });
+    document.getElementById("btnRefresh").onclick = () => postNative({ action: "refresh" });
+    window.addEventListener("resize", () => { if (lastPayload) drawChart(lastPayload.selected?.metrics || []); });
+  </script>
+</body>
+</html>
